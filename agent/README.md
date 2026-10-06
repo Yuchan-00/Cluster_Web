@@ -32,7 +32,8 @@ The token file must be mode 0600 and owned by the agent account. Install with
 
 ## Messages sent to the master (docs/PLAN.md 12.1)
 
-`hello` (static info, labels, capacity, isolation, node policy summary, `running_commands`),
+`hello` (static info, labels, capacity, isolation, node policy summary, `running_commands`,
+`pending_results`),
 `metrics` every 5 s (doubles as heartbeat), `cmd_output`, and `cmd_result` with `status` set
 to one of: ok, error, timeout, cancelled, oom, scheduled, rejected, failed_to_start.
 

@@ -868,7 +868,7 @@ UMask=0077
 [network=none 일 때] -p PrivateNetwork=yes
 ```
 
-- `TemporaryFileSystem` 위에 `BindPaths`로 자기 디렉터리만 다시 보이게 하는 조합이 대상 systemd 버전에서 동작하는지 Phase 1에서 확인한다(안 되면 `InaccessiblePaths`로 다른 run 디렉터리 상위를 막고 디렉터리 권한 0700에 의존).
+- `TemporaryFileSystem` 위에 `BindPaths`로 자기 디렉터리만 다시 보이게 하는 조합은 **Phase 1 CI(Ubuntu 24.04, systemd 255)에서 동작을 확인했다**(`execd/tests/test_systemd.py`: 다른 run 숨김, 토큰·소켓 접근 거부, NoNewPrivs, PrivateNetwork, RuntimeMaxSec→timeout, MemoryMax→oom, 취소 시 setsid 자식까지 종료). RDK OS·Pi OS의 systemd 버전에서는 Phase 0에서 같은 테스트를 다시 돌린다(안 되면 `InaccessiblePaths`로 다른 run 디렉터리 상위를 막고 디렉터리 권한 0700에 의존). `InaccessiblePaths` 항목은 `-` 접두사를 붙여, 노드에 없는 경로 때문에 네임스페이스 설정이 실패(종료 코드 226)하지 않게 한다. 실행 결과는 systemd-run 반환값이 아니라 유닛의 `Result`(`oom-kill`·`timeout`·`exit-code`)로 판정하므로 일반 실행에는 `--collect`를 쓰지 않고 판정 후 `reset-failed`한다.
 - 작업 디렉터리 `/var/lib/cluster-run/work/<run_id>`는 execd가 `cluster-run` 소유 0700으로 만들고, 종료 후 산출물 수집(9.3 `collect`)이 끝나면 삭제한다(실패 Attempt 보존 규칙은 jobs.md 9.3).
 - 번들 캐시 `/var/lib/cluster-run/cache/{bundles,data}/<sha256>`는 execd가 root 소유로 푼다. `cluster-run`은 읽기만 한다.
 - 셸 명령은 run마다 새 작업 디렉터리를 쓰고 영속 홈은 두지 않는다(v1). **agent·execd 경로는 항상 InaccessiblePaths**에 둔다.

@@ -780,4 +780,4 @@ flowchart LR
 
 ### 21.3 Phase 0·구현 시 확인할 사실 (사용자 결정 아님)
 
-BPU 코어 지정·동시 공유 동작 · `systemd-run --uid --pipe --wait` 종료 코드 전달과 하드닝 속성 적용 여부 · `TemporaryFileSystem`+`BindPaths` 조합 · cgroup 컨트롤러 · ION/CMA 예약량 · needrestart 모드 · `journalctl --facility` 지원 · vcgencmd 권한 · Telegram Bot API 한도와 `<pre>` 안 자동 링크 여부 · anthropic SDK 세부(`fallbacks`·최상위 `cache_control` 전달 방식, `strict` 지정, 캐시 수명) · Tailscale과 nftables 공존 · Secure 쿠키의 `http://localhost` 동작.
+BPU 코어 지정·동시 공유 동작 · 하드닝 속성과 `TemporaryFileSystem`+`BindPaths` 조합의 RDK OS·Pi OS systemd 버전 동작(Ubuntu 24.04에서는 Phase 1 CI로 확인됨, 결과 판정은 유닛 `Result` 사용) · cgroup 컨트롤러 · ION/CMA 예약량 · needrestart 모드 · `journalctl --facility` 지원 · vcgencmd 권한 · Telegram Bot API 한도와 `<pre>` 안 자동 링크 여부 · anthropic SDK 세부(`fallbacks`·최상위 `cache_control` 전달 방식, `strict` 지정, 캐시 수명) · Tailscale과 nftables 공존 · Secure 쿠키의 `http://localhost` 동작.
