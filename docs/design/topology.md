@@ -21,17 +21,19 @@
 
 | 호스트명 | 보드 | RAM | 유선 LAN | 역할 | 상주 서비스 |
 |---|---|---|---|---|---|
-| `rdkx3-01` | RDK X3 | 2GB 또는 4GB (Phase 0 확인) | 1Gbps | **master** + worker(축소) | cluster-master, cluster-agent, cluster-telegram, cluster-ai, Caddy, 외부 접속 데몬, chrony(서버) |
-| `rdkx3-02` | RDK X3 | 2GB 또는 4GB (Phase 0 확인) | 1Gbps | worker(BPU 주력) + **master 콜드 스탠바이** | cluster-agent (master 계열 서비스는 설치만 하고 mask) |
-| `rpi3-01` | Raspberry Pi 3B | 1GB | 100Mbps (USB2 버스 공유) | worker(CPU) | cluster-agent |
-| `rpi3-02` | Raspberry Pi 3B | 1GB | 100Mbps (USB2 버스 공유) | worker(CPU) | cluster-agent |
-| `rpi3-03` | Raspberry Pi 3B | 1GB | 100Mbps (USB2 버스 공유) | worker(CPU) | cluster-agent |
+| `rdkx3-01` | RDK X3 | 2GB 또는 4GB (Phase 0 확인) | 1Gbps | **master** + worker(축소) | cluster-master, cluster-agent, cluster-execd, cluster-telegram, cluster-ai, Caddy, tailscaled, chrony(서버) |
+| `rdkx3-02` | RDK X3 | 2GB 또는 4GB (Phase 0 확인) | 1Gbps | worker(BPU 주력) + **master 콜드 스탠바이** | cluster-agent, cluster-execd, tailscaled (master 계열 서비스는 설치만 하고 mask) |
+| `rpi3-01` | Raspberry Pi 3B | 1GB | 100Mbps (USB2 버스 공유) | worker(CPU) | cluster-agent, cluster-execd |
+| `rpi3-02` | Raspberry Pi 3B | 1GB | 100Mbps (USB2 버스 공유) | worker(CPU) | cluster-agent, cluster-execd |
+| `rpi3-03` | Raspberry Pi 3B | 1GB | 100Mbps (USB2 버스 공유) | worker(CPU) | cluster-agent, cluster-execd |
 
-Pi 3B는 PoE와 Wake-on-LAN을 지원하지 않는다. 즉 **원격으로 끈 노드는 물리적으로 전원을 다시 꽂아야 켜진다** (PLAN.md 6장의 poweroff 경고 유지). 원격 전원 사이클은 "나중" 단계의 스마트 플러그 확장으로 미룬다.
+Pi 3B는 PoE와 Wake-on-LAN을 지원하지 않는다. 즉 **원격으로 끈 노드는 물리적으로 전원을 다시 꽂아야 켜진다** (PLAN.md 8장의 poweroff 경고 유지). 원격 전원 사이클은 "나중" 단계의 스마트 플러그 확장으로 미룬다.
 
 ### 1.2 스케줄러 레이블과 기본 용량
 
-agent는 접속 시 `hello.static_info`에 아래 레이블과 용량을 실어 보낸다. **자동 감지값이 기본이고, `/etc/cluster-agent/config.yaml`의 값이 있으면 그것이 우선**한다. 레이블 키 이름은 [jobs.md](./jobs.md)의 배치 조건(selector)과 공유하는 계약이다.
+agent는 접속 시 `hello.static_info`에 아래 레이블과 용량을 실어 보낸다. 노드 쪽에서는 자동 감지값이 기본이고 `/etc/cluster-agent/config.yaml`의 값이 있으면 그것이 우선한다(config는 SSH/Ansible로만 바꾸는 신뢰 경로). 레이블 키 이름은 [jobs.md](./jobs.md)의 배치 조건(selector)과 공유하는 계약이다.
+
+**권위값은 master 쪽이다.** 노드가 침해되면 그 노드의 config도 공격자 통제이므로, 보안·배치에 영향을 주는 레이블(`node_role`, `standby`, `dataset.*`)과 용량(`slots`, `bpu_slots`, `job_mem_mb`)은 admin이 노드 등록 시 확정한 **master 등록 레코드 값**을 스케줄러가 쓴다. 첫 접속의 보고값은 등록 화면에 기본값으로 제안되고, 이후 보고값이 등록값과 다르면 경고만 낸다([security.md](./security.md) 8.3). 아래 표의 "출처"는 노드 쪽 기본값의 출처다.
 
 | 키 | 값 예 | 출처 | 용도 |
 |---|---|---|---|
@@ -55,11 +57,11 @@ agent는 접속 시 `hello.static_info`에 아래 레이블과 용량을 실어 
 
 | 호스트명 | 레이블 | slots | bpu_slots | job_mem_mb (2GB 보드 / 4GB 보드) |
 |---|---|---|---|---|
-| `rdkx3-01` | `board=rdkx3 arch=aarch64 bpu=2 net_mbps=1000 node_role=master storage=ssd*` | 1 | 1 | 512 / 1536 |
-| `rdkx3-02` | `board=rdkx3 arch=aarch64 bpu=2 net_mbps=1000 node_role=worker standby=master storage=sd` | 3 | 2 | 1280 / 3072 |
-| `rpi3-0N` | `board=rpi3 arch=aarch64 bpu=0 net_mbps=100 node_role=worker storage=sd` | 2 | 0 | 512 |
+| `rdkx3-01` | `board=rdkx3 arch=aarch64 bpu=2 net_mbps=1000 node_role=master storage=ssd*` | 1 (2GB에서 공식 < 256이면 0) | 1 (같음) | 공식 결과 / 1408 |
+| `rdkx3-02` | `board=rdkx3 arch=aarch64 bpu=2 net_mbps=1000 node_role=worker standby=master storage=sd` | 3 | 2 | 1024 / 2816 |
+| `rpi3-0N` | `board=rpi3 arch=aarch64 bpu=0 net_mbps=100 node_role=worker storage=sd` | 2 | 0 | 384 (잠정) |
 
-`*` USB SSD를 붙인 경우. `slots`/`job_mem_mb`는 **잡**(큐 경유)에만 적용된다. 즉시 실행되는 **명령**은 슬롯을 차지하지 않고 노드당 동시 실행 상한(PLAN.md 6장, 기본 2)만 따른다. 두 경로 모두 agent의 같은 executor와 같은 실행 계정 `cluster-run`을 쓴다.
+`*` USB SSD를 붙인 경우. `slots`/`job_mem_mb`는 **잡**(큐 경유)에만 적용된다. 즉시 실행되는 **명령**은 슬롯을 차지하지 않고 노드당 동시 실행 상한(PLAN.md 8장, 기본 2)만 따른다. 두 경로 모두 agent의 같은 executor와 같은 실행 계정 `cluster-run`을 쓴다.
 
 ```yaml
 # /etc/cluster-agent/config.yaml (발췌, rdkx3-02 예)
@@ -69,16 +71,16 @@ labels:
   node_role: worker
   standby: master
   storage: sd
-capacity:          # 생략 시 board 기본값
+capacity:          # 생략 시 board 기본값. 스케줄러는 master 등록값을 쓴다
   slots: 3
   bpu_slots: 2
-  job_mem_mb: 1280
+  job_mem_mb: 1024
 ```
 
 ### 1.3 노드 증감
 
 - RDK X3는 `rdkx3-0N` → `192.168.1.201~208`, Pi는 `rpi3-0N` → `192.168.1.211~219` 범위에서 추가한다.
-- 추가: OS 설치 → 9장 설치 순서 → admin이 노드 등록(토큰 발급) → agent가 접속하면 레이블이 자동 등록되어 스케줄러 후보가 된다.
+- 추가: OS 설치 → 9장 설치 순서 → admin이 노드 등록(토큰 발급) → agent 첫 접속 시 보고한 레이블·용량을 admin이 등록 화면에서 확인·확정(step-up) → 스케줄러 후보가 된다.
 - 제거: 노드 토큰 폐기 후 전원 차단. 진행 중이던 잡의 재배치는 [jobs.md](./jobs.md).
 
 ---
@@ -89,7 +91,7 @@ capacity:          # 생략 시 board 기본값
 flowchart TB
   subgraph R1["rdkx3-01 · master"]
     CADDY["Caddy"]
-    EXT["외부 접속 데몬<br/>security.md에서 선택"]
+    EXT["tailscaled<br/>외부 접속, security.md 3장"]
     M["cluster-master<br/>FastAPI · SQLite WAL"]
     TG["cluster-telegram"]
     AI["cluster-ai"]
@@ -104,15 +106,17 @@ flowchart TB
   subgraph P["rpi3-01 ~ 03 · worker"]
     AP["cluster-agent x3"]
   end
-  EXT --> CADDY --> M
+  EXT -- "tailscale serve · 웹" --> M
   TG -- "서비스 토큰 · 내부 API" --> M
   AI -- "서비스 토큰 · 내부 API" --> M
-  A1 -- "wss" --> M
-  A2 -- "wss" --> M
-  AP -- "wss" --> M
+  A1 -- "wss" --> CADDY
+  A2 -- "wss" --> CADDY
+  AP -- "wss" --> CADDY
+  CADDY -- "/ws/agent · /api/agent/*" --> M
   M -.->|"cluster-backup.timer 1시간"| BK
 ```
 
+- 웹(브라우저)은 tailscale serve → cluster-master(127.0.0.1:8000)로 직접 간다. Caddy는 agent 경로(`/ws/agent`, `/api/agent/*`) TLS 종료 전용이다([security.md](./security.md) 4.1).
 - 모든 agent는 **물리 호스트명이 아니라 서비스 이름 `master.cluster.internal`(VIP)** 로 접속한다. failover 시 VIP만 옮기면 agent 설정은 그대로다 (3.3절).
 - cluster-telegram과 cluster-ai는 master DB에 직접 접근하지 않고 내부 API만 호출한다. 같은 호스트에 있지만 별도 systemd 서비스/별도 계정이다(계정·토큰은 [security.md](./security.md)).
 
@@ -140,7 +144,7 @@ flowchart LR
 | 케이블 | Cat5e 이상, 전 노드 유선. **Pi 3B의 Wi-Fi/BT는 끈다** (공격 표면·전력 절감) | — |
 | 업링크 | 스위치 ↔ 공유기 1회선 | — |
 | 외부 진입점 | **rdkx3-01 한 곳만**. 공유기 포트포워딩 금지. 방식(VPN/터널)과 정책은 [security.md](./security.md) | — |
-| 아웃바운드 | rdkx3-01: Telegram Bot API(HTTPS), 외부 접속 데몬, (선택) AI 백엔드. 전 노드: apt, NTP | 노드별 egress 제한 ([security.md](./security.md)) |
+| 아웃바운드 | rdkx3-01: Telegram Bot API(HTTPS), Tailscale, Claude API(HTTPS), 외부 dead-man ping(7.4). 전 노드: apt, NTP | 노드별 egress 제한 ([security.md](./security.md)) |
 
 텔레그램 봇은 아웃바운드 연결만 필요하다는 전제로 둔다(수신 방식은 [telegram.md](./telegram.md)). 따라서 텔레그램 때문에 인바운드 포트를 열 일은 없다.
 
@@ -181,9 +185,15 @@ v2 선택지: 공유기(dnsmasq 지원 시)나 rdkx3-01의 로컬 DNS로 이전.
 
 ```bash
 # cluster-vip.service 가 하는 일 (현재 master에서만 enable)
-ip addr add 192.168.1.200/24 dev eth0 label eth0:vip
+# VIP 주소 자체는 네트워크 설정 도구(C21 결과)의 보조 주소로 영속화하고, 서비스는 붙이기·떼기와 ARP 갱신만 한다
+nmcli con mod "<eth0 연결>" +ipv4.addresses 192.168.1.200/24 && nmcli con up "<eth0 연결>"   # NetworkManager인 경우
+#   netplan인 경우: addresses 목록에 192.168.1.200/24 추가 후 netplan apply
 arping -U -c 3 -I eth0 192.168.1.200   # 다른 노드의 ARP 캐시 갱신 (iputils-arping)
 ```
+
+- `ip addr add`로 붙인 수동 주소는 NetworkManager/netplan이 인터페이스를 다시 적용하거나 DHCP를 갱신할 때 사라질 수 있다. 그래서 위처럼 **연결 프로필의 보조 주소**로 둔다(어느 도구인지는 Phase 0 C21). failover 시에는 rdkx3-01에서 제거(전원 차단이 기본)하고 rdkx3-02 프로필에 추가한다.
+- 부팅 순서: `caddy.service`와 chrony 서버 설정 유닛에 `Requires=cluster-vip.service`, `After=cluster-vip.service`. VIP가 없으면 Caddy가 `bind: cannot assign requested address`로 실패해 5대가 모두 offline이 되기 때문이다.
+- 대안: Caddy를 `0.0.0.0:443`에 바인드하고 nft의 `ip daddr $VIP tcp dport 443` 규칙으로 VIP 외 접근을 막는다(VIP 소실 시에도 Caddy는 살아 있음). 기본은 위 방식, C21 결과가 불안정하면 대안으로 바꾼다.
 
 ### 3.4 Pi 3B 100Mbps 병목과 분산 작업
 
@@ -225,7 +235,7 @@ master(1Gbps)는 Pi 3대에 동시에 보내도(3 × 100Mbps) 링크가 남으�
 |---|---|---|
 | 방열 | 방열판 필수, 장시간 잡이면 팬 | 방열판 + 팬 권장 (BPU 부하 시 발열 큼) |
 | 스로틀링 | 80°C부터 클럭 제한, 85°C 강제 스로틀 (`get_throttled` bit 2·3으로 확인) | trip point를 Phase 0에서 `thermal_zone*/trip_point_*_temp`로 확인 |
-| 경고 | PLAN.md 10장: 70°C warning / 80°C critical | 동일 |
+| 경고 | PLAN.md 7.4: 70°C warning / 80°C critical | 동일 |
 
 - 스택형 케이스는 아래→위로 공기가 흐르도록 팬을 한쪽 끝에 둔다.
 - 스케줄러 입력: 온도가 warning 이상이거나 Pi의 스로틀링 비트가 켜진 노드에는 신규 잡을 배치하지 않는 것을 권장(정책 확정은 [jobs.md](./jobs.md)).
@@ -235,7 +245,7 @@ master(1Gbps)는 Pi 3대에 동시에 보내도(3 × 100Mbps) 링크가 남으�
 
 | 노드 | 부트/루트 | 데이터 | 비고 |
 |---|---|---|---|
-| `rdkx3-01` | microSD 32GB 이상, A1 이상, High Endurance 계열 | **권장: USB SSD를 `/var/lib/cluster-master`에 마운트** (SQLite DB, 백업 스테이징) | fstab에 UUID + `nofail`, 유닛에 `RequiresMountsFor=/var/lib/cluster-master`. SSD가 없으면 SD에 두고 PLAN.md 9장의 쓰기 절감 규칙에 의존 |
+| `rdkx3-01` | microSD 32GB 이상, A1 이상, High Endurance 계열 | **권장: USB SSD를 `/var/lib/cluster-master`에 마운트** (SQLite DB, 백업 스테이징) | fstab에 UUID + `nofail`, 유닛에 `RequiresMountsFor=/var/lib/cluster-master`. SSD가 없으면 SD에 두고 PLAN.md 13장의 쓰기 절감 규칙에 의존 |
 | `rdkx3-02` | microSD 32GB 이상 | `/var/backups/cluster-master` (암호화 백업 번들, 수십 MB 규모) | failover 시 SD에서 master를 돌리게 되므로 SSD 이동은 선택 |
 | `rpi3-0N` | microSD 16~32GB, A1 이상 | 잡 작업 디렉터리·캐시는 SD | USB 부팅은 이더넷과 버스를 공유하므로 쓰지 않는다 |
 
@@ -265,7 +275,7 @@ Pi에는 RTC가 없어 부팅 직후 시계가 틀릴 수 있다(Pi OS의 `fake-
 
 - master 서버 설정에 `local stratum` 은 넣지 않는다(상위와 끊긴 상태에서 틀린 시간을 배포하지 않도록).
 - cluster-agent 유닛은 `After=time-sync.target`, `Wants=time-sync.target`. 동기화 완료를 기다리는 `chrony-wait.service`(또는 동등 유닛)가 배포판에 있는지 Phase 0에서 확인하고 enable 한다.
-- 저장 시각은 여전히 master 수신 시각 기준(PLAN.md 7장)이다.
+- 저장 시각은 여전히 master 수신 시각 기준(PLAN.md 12장)이다.
 
 ---
 
@@ -274,6 +284,8 @@ Pi에는 RTC가 없어 부팅 직후 시계가 틀릴 수 있다(Pi OS의 `fake-
 | 보드 | 권장 OS | 이유 | 확인 사항 (Phase 0) |
 |---|---|---|---|
 | RDK X3 (두 대 모두) | **Ubuntu 22.04 기반 RDK OS, server(데스크톱 없는) 구성** | 기본 Python 3.10 → master를 별도 Python 빌드 없이 실행. rdkx3-02도 master 후보이므로 **두 대 모두 같은 22.04 계열 이미지**여야 한다 | 이미지 버전, 커널 버전, 데스크톱 비활성 가능 여부(`systemctl set-default multi-user.target`), 벤더 apt 저장소의 BSP 업데이트 방식 |
+
+**Python < 3.10 대비 (C3)**: master·cluster-telegram·cluster-ai는 Python 3.10 이상이 필수다(anthropic SDK 1.x 요구). Phase 0에서 RDK X3 이미지가 20.04 계열(Python 3.8)로 확인되고 22.04 계열을 쓸 수 없으면, `/opt/cluster-web/python`에 **aarch64용 독립 실행형 CPython 3.11 빌드**를 CI 릴리스 산출물로 포함하고(`SHA256SUMS`로 검증, [security.md](./security.md) 17장) 그 위에 venv를 만든다. agent·execd는 시스템 `python3`(≥3.8)을 그대로 쓴다.
 | Pi 3B | **Raspberry Pi OS Lite 64-bit** (릴리스는 Phase 0 시점의 현행 안정판) | 클러스터 전체가 `arch=aarch64` 하나로 통일 → 잡 바이너리/wheel 한 벌, 스케줄러의 arch 분기 불필요. 64-bit가 Pi 3 계열 Imager 기본 | 64-bit의 메모리 오버헤드 실측 |
 
 **Pi 3B 64-bit 트레이드오프**: 포인터가 8바이트라 Python처럼 객체가 많은 프로세스는 32-bit 대비 RSS가 대략 10~20% 늘어난다. 1GB에서는 이 차이가 잡 할당량을 수십 MB 줄인다. Phase 0에서 agent RSS가 45MB를 넘거나 잡 OOM이 잦으면 32-bit(armhf)로 바꾸고 `arch=armv7l` 레이블로 구분한다(스케줄러는 arch 레이블을 존중해야 함).
@@ -289,10 +301,14 @@ Pi에는 RTC가 없어 부팅 직후 시계가 틀릴 수 있다(Pi OS의 `fake-
 ```text
 job_mem_mb = MemTotal(실측, BPU/멀티미디어 예약 메모리 제외 후)
            - 상주 서비스 RSS 목표 합계
+           - execd_overhead_mb × (slots + bpu_slots + 명령 동시 상한)
            - 여유분 (page cache·순간 피크; RDK X3 300MB, Pi 3B 200MB)
 ```
 
 결과를 64MB 단위로 내림해 1.2절 표의 `job_mem_mb`로 쓴다. Phase 0 실측 후 재계산한다.
+
+- `execd_overhead_mb`: cluster-execd는 실행 중인 명령·Task 하나마다 연결당 root Python 프로세스 + `systemd-run` 클라이언트를 실행이 끝날 때까지 유지한다([security.md](./security.md) 9.3). 초기값 **25MB**, Phase 1에서 실측해 교체한다. v2에서 execd가 연결을 붙잡지 않고 `StandardOutput=file:`로 출력을 넘기는 방식(re-adopt와 같은 기반, [jobs.md](./jobs.md) 7.5)으로 바꾸면 이 항목이 거의 사라진다.
+- execd 소켓의 `MaxConnections`도 같은 입력으로 계산한다: `slots + bpu_slots + 명령 동시 상한 + 4`.
 
 ### 6.2 rdkx3-01 (master 동거)
 
@@ -307,12 +323,14 @@ job_mem_mb = MemTotal(실측, BPU/멀티미디어 예약 메모리 제외 후)
 | cluster-telegram | ≤60MB | 120M | 유휴 <1% | -300 |
 | cluster-ai (오케스트레이터만, **모델 추론 제외**) | ≤150MB | 300M | 유휴 <1% | -300 |
 | Caddy | ≤40MB | 100M | <2% | -300 |
-| 외부 접속 데몬 (예: tailscaled) | ≤50MB | 100M | <2% | -300 |
+| tailscaled | ≤50MB | 100M | <2% | -300 |
+| cluster-execd (실행당, 2GB 기준 slots 1 + bpu 1 + 명령 2) | 25MB × 4 = 100MB (실측) | — | 순간 | -800 |
 | cluster-backup (1시간마다 순간 실행) | ≤50MB | 100M | 순간 | 0 |
-| **상주 합계** | **≈790MB** | | **유휴 합계 <15%** | |
+| **상주 합계 (execd 최대치 포함)** | **≈890MB** | | **유휴 합계 <15%** | |
 | 여유분 | 300MB | | | |
-| **잡 할당 (`job_mem_mb`)** | **2GB: 512MB / 4GB: 1536MB** | 잡 slice 전체에 적용 | `CPUWeight` 낮게 | +500 |
+| **잡 할당 (`job_mem_mb`)** | **2GB: 공식 결과에 따름(아래 규칙) / 4GB: 1408MB** | `cluster-jobs.slice` 전체에 적용 | `CPUWeight` 낮게 | +500 |
 
+- **2GB 보드 결정 규칙**: 공식 결과 `job_mem_mb < 256`이면 rdkx3-01은 `slots=0`, `bpu_slots=0`(잡 미배치, master 전용)으로 두고, ION/CMA 예약 축소(벤더 설정 도구 사용 가능 여부는 Phase 0 R6)를 먼저 검토한다. 256 이상이면 64MB 단위 내림 값을 쓴다. 2GB에서 예약 메모리가 크지 않으면 대략 384MB 안팎이 나온다(실측 전 추정).
 - **rdkx3-01에서는 LLM 추론을 돌리지 않는다.** 2GB 보드에서는 상주 서비스만으로 절반 가까이 쓰므로, 로컬 모델이 필요하면 rdkx3-02나 외부 PC/API에 둔다. 배치 결정은 [ai-agent.md](./ai-agent.md).
 - 메모리가 부족할 때 커널이 **잡 → 부가 서비스 → master/agent 순으로 죽이도록** OOMScoreAdjust를 건다. 이 설정은 cgroup 지원 여부와 무관하게 동작한다.
 - master 보호를 위해 rdkx3-01의 `slots=1`, `bpu_slots=1`로 낮춘다. BPU 잡은 rdkx3-02를 우선한다([jobs.md](./jobs.md)).
@@ -325,8 +343,10 @@ job_mem_mb = MemTotal(실측, BPU/멀티미디어 예약 메모리 제외 후)
 | OS 기본 | ≈250MB |
 | BPU/멀티미디어 예약 | Phase 0 실측 |
 | cluster-agent | ≤40MB, CPU <3% |
+| tailscaled | ≤50MB (평소 SSH용, failover 대비) |
+| cluster-execd (실행당 25MB × slots 3 + bpu 2 + 명령 2) | ≈175MB (실측) |
 | 여유분 | 300MB |
-| 잡 할당 | 2GB: 1280MB / 4GB: 3072MB (예약 메모리 실측 후 조정) |
+| 잡 할당 | 2GB: 1024MB / 4GB: 2816MB (예약 메모리·execd 실측 후 조정) |
 
 failover로 master가 되면 6.2 표를 그대로 적용하고 `node_role=master`, `slots=1`, `bpu_slots=1`로 바꾼다.
 
@@ -336,12 +356,13 @@ failover로 master가 되면 6.2 표를 그대로 적용하고 `node_role=master
 |---|---|
 | MemTotal (`gpu_mem=16`, 헤드리스) | ≈900MB 내외, Phase 0 실측 |
 | OS 기본 (Lite 64-bit, sshd/journald/chrony) | ≈150MB |
-| cluster-agent | **RSS ≤40MB (64-bit에서 45MB 초과 시 5장의 32-bit 재검토), CPU <3%** (PLAN.md 15장) |
+| cluster-agent | **RSS ≤40MB (64-bit에서 45MB 초과 시 5장의 32-bit 재검토), CPU <3%** (PLAN.md 19장) |
 | 여유분 | 200MB |
-| 잡 할당 | **512MB** (`slots=2` → 잡당 기본 256MB) |
+| cluster-execd (실행당 25MB × slots 2 + 명령 2) | ≈100MB (실측) |
+| 잡 할당 | **384MB 잠정** (공식: ≈900 − 150 − 40 − 100 − 200 ≈ 410 → 64MB 내림. `slots=2`이므로 256MB 잡 1개 + 128MB 잡 1개, 또는 192MB 잡 2개. execd 실측이 25MB보다 작으면 448로 올림) |
 | 스왑 | zram (SD 스왑 금지) |
 
-- 외부 접속 데몬을 Pi에도 설치할지는 [security.md](./security.md)가 정한다. 설치하면 잡 할당을 64MB 줄인다.
+- Pi에는 tailscaled를 설치하지 않는다([security.md](./security.md) 3.2).
 - Pi의 Wi-Fi/BT 비활성(`dtoverlay=disable-wifi`, `dtoverlay=disable-bt`), 불필요 서비스 제거로 메모리를 확보한다.
 
 ---
@@ -381,19 +402,35 @@ sequenceDiagram
 | 보관 형태 | **암호화된 번들만** 저장. rdkx3-02는 사용자 셸 명령과 잡이 도는 worker이므로 평문 DB·비밀값을 두지 않는다. 복호화 키는 클러스터 밖(관리자 보관)에 둔다. 키 관리와 암호화 도구는 [security.md](./security.md) |
 | 보존 | 시간별 24개, 일별 7개, 주별 4개 |
 | 감시 | 마지막 성공 백업이 2시간 넘게 없으면 `alert.raised` (텔레그램 알림 경로는 [telegram.md](./telegram.md)) |
+| **오프사이트 사본 (v1 필수)** | 관리 PC가 주 1회(그리고 큰 변경 후) rdkx3-02의 `/var/backups/cluster-master`에서 최신 일별 번들을 **pull**한다(관리자 SSH 키, 관리 PC 쪽 타이머 또는 수동). 관리 PC에도 암호문만 두고 복호화 키는 별도 보관([security.md](./security.md) 12.1) |
+
+**수용된 위험 (rdkx3-02 집중)**: rdkx3-02는 잡 코드를 가장 많이 실행하는 노드이면서 백업 번들(감사 로그 포함)을 보관한다. 잡을 통한 침해가 root까지 번지면 로컬 백업 사본이 파괴될 수 있다. 기밀성은 age 암호화(복호화 키는 클러스터 밖), 무결성은 텔레그램 head 앵커([security.md](./security.md) 13.2)로 유지되므로 **가용성 손실만** 수용한다. 그래서 복구 절차(7.3)는 **관리 PC의 오프사이트 사본만으로도** 성립해야 하며, v1 완료 전 리허설에서 rdkx3-02 사본 없이 관리 PC 사본으로 복원해 본다. v2: 감사 봉인 보관을 잡을 돌리지 않는 장치로 분리(security.md 13.2).
 
 ### 7.3 수동 failover 절차 개요
 
 1. **rdkx3-01이 확실히 멈췄는지 확인**하고, 살아 있다면 전원을 뽑거나 랜선을 분리한다(split-brain 방지의 핵심).
-2. rdkx3-02에 관리 PC에서 SSH 접속, 최신 번들을 복호화 키로 풀어 `/var/lib/cluster-master`와 `/etc/cluster-master`에 복원한다.
-3. 복원된 DB에서 **진행 중이던 명령·잡 실행은 유실(lost) 처리, 대기 중이던 승인(approvals)은 만료 처리**한다. 백업 시점 이후 상태를 신뢰할 수 없기 때문이다(잡 재배치 규칙은 [jobs.md](./jobs.md), 승인 처리 규칙은 [security.md](./security.md)).
+2. rdkx3-02에 관리 PC에서 SSH 접속, 최신 번들(rdkx3-02 사본이 손상됐으면 관리 PC 사본)을 복호화 키로 풀어 `/var/lib/cluster-master`와 `/etc/cluster-master`에 복원한다.
+3. 복원된 DB에서 **진행 중이던 명령·잡 실행은 유실(lost) 처리, 대기 중이던 승인(approvals)은 만료 처리**한다. 백업 시점 이후 상태를 신뢰할 수 없기 때문이다(잡 재배치 규칙은 [jobs.md](./jobs.md) 7.6, 승인 처리 규칙은 [security.md](./security.md) 7.5-3). 표시 번호(`J-n`, `T-n`, 명령 `#n`)는 `max+1000`부터 다시 시작한다(jobs.md 17장).
 4. master 계열 서비스를 unmask → `cluster-vip` → cluster-master → cluster-telegram → cluster-ai → Caddy 순으로 시작한다.
-5. 외부 접속 경로를 rdkx3-02로 전환한다([security.md](./security.md)의 절차).
+5. 외부 접속 경로를 rdkx3-02로 전환한다: rdkx3-02에서 `tailscale serve`([security.md](./security.md) 3.4) + `cluster-master-admin config set web_base_url https://<rdkx3-02 기기이름>.<tailnet>.ts.net`(텔레그램 "상세 보기" 링크). Origin 허용 목록 `web.origins`에는 처음부터 두 URL이 들어 있으므로 바꿀 필요가 없다(security.md 5.6).
 6. agent들이 `master.cluster.internal`로 자동 재접속하는지 대시보드에서 확인한다(agent 토큰 해시는 DB에 있으므로 재발급 불필요).
 7. rdkx3-02의 agent 설정을 `node_role=master`, `slots=1`, `bpu_slots=1`로 바꾸고 재시작한다. chrony에 `allow` 대역을 넣어 NTP 서버 역할도 넘긴다.
 8. 텔레그램으로 failover 완료를 보고한다.
 
 복구(failback)는 같은 절차를 반대로 하되, rdkx3-02에서 새로 뜬 백업을 원본으로 쓴다. 절차를 묶은 `deploy/failover/promote_standby.sh`는 v2. **v1 완료 전에 failover 리허설을 한 번 해본다.**
+
+### 7.4 master 생존 감시 (v1)
+
+notifier·outbox·cluster-telegram이 모두 rdkx3-01에 있으므로 **rdkx3-01 자체가 죽으면(전원, SD 고장, 커널 패닉) 텔레그램은 조용하다.** 백업 누락 경보도 master가 살아 있어야 나간다. 그래서 클러스터 밖에서 "소식이 끊기면 알리는" 감시를 하나 둔다.
+
+| 선택지 | 방식 | 시크릿 | 판정 |
+|---|---|---|---|
+| **(a) 외부 dead-man 서비스** | cluster-master가 이벤트 루프에서 5분마다 외부 dead-man 서비스(예: healthchecks 계열 SaaS 또는 자체 호스팅. 서비스 선택은 Phase 0)의 ping URL로 **아웃바운드** HTTPS 요청을 보낸다. 내부 점검(DB 쓰기 가능, agent 허브 동작, 감사 큐 정상)을 통과할 때만 보낸다. 15분간 ping이 없으면 그 서비스가 이메일·텔레그램으로 알린다 | ping URL 하나 (`LoadCredential`, security.md 12.1). 탈취돼도 가짜 "살아 있음"으로 알림을 늦추는 것뿐 | **권장 (v1)** |
+| (b) rdkx3-02 감시 | rdkx3-02의 `cluster-standby-watch.timer`(root, 3분 간격)가 VIP:443 TLS 핸드셰이크와 `/ws/agent` 업그레이드 응답(401 기대)을 확인하고 3회 연속 실패하면 **send-only 전용 봇**(주 봇과 다른 봇, 채팅 1개에 `sendMessage`만)으로 알린다 | 별도 봇 토큰(rdkx3-02 root 0600). 탈취돼도 알림 위조만 가능 | 외부 서비스를 쓰고 싶지 않을 때 |
+
+- (a)는 rdkx3-01 다운, 인터넷 단절, master 행(hang)을 모두 잡는다. 집 인터넷이 끊겨도 알림이 오는데, 그때는 클러스터 자체는 정상일 수 있다는 점을 알림 문구에 적는다.
+- 알림을 받으면 7.3 절차의 1단계(확인)부터 시작한다. RTO 30분은 감지 시점부터 센다.
+- [telegram.md](./telegram.md) 8.1의 "master 무응답(외부 감시)" 행이 이것이다.
 
 ---
 
@@ -401,7 +438,7 @@ sequenceDiagram
 
 ### 8.1 확인 명령
 
-명령은 설치용 관리자 계정으로 실행한다. `sudo -u cluster-agent ...` 항목은 9장의 agent 설치 직후 다시 확인한다.
+명령은 설치용 관리자 계정으로 실행한다. `sudo -u cluster-agent ...` 항목은 9장의 agent 설치 직후 다시 확인한다. (사용자 단위 `systemd-run --user` 확인은 하지 않는다: 실행은 root 소유 cluster-execd가 시스템 수준 `systemd-run`으로 한다.)
 
 **공통 (5대 모두)**
 
@@ -409,13 +446,13 @@ sequenceDiagram
 |---|---|---|---|
 | C1 | 보드 모델 | `tr -d '\0' < /proc/device-tree/model; echo` | board 자동 감지 문자열 확보 |
 | C2 | OS / 커널 / 아키텍처 | `cat /etc/os-release; uname -rm` | RDK X3: 22.04 계열, Pi: aarch64 |
-| C3 | Python | `python3 --version` | RDK X3 ≥3.10 (master 후보), Pi ≥3.8 |
+| C3 | Python | `python3 --version` | RDK X3 ≥3.10 (master 후보), Pi ≥3.8. RDK X3가 <3.10이면 5장의 독립 Python 경로 |
 | C4 | systemd | `systemd --version \| head -1` | 버전 기록 |
 | C5 | cgroup 버전 | `stat -fc %T /sys/fs/cgroup` | `cgroup2fs` = v2, `tmpfs` = v1/hybrid |
 | C6 | 활성 컨트롤러 | `cat /sys/fs/cgroup/cgroup.controllers` | `memory`, `cpu` 포함 여부 |
-| C7 | 시스템 서비스 수준 제한 동작 | `sudo systemd-run --wait --collect -p MemoryMax=64M -p CPUQuota=50% sh -c 'cat /proc/self/cgroup; cat /sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)/memory.max'` | `67108864` 출력되면 memory 제한 가능 |
-| C8 | 사용자 매니저 위임 | `cat /sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service/cgroup.controllers` | 위임된 컨트롤러 목록 기록 |
-| C9 | 사용자 단위 systemd-run | `systemd-run --user --wait --collect -p MemoryMax=64M true; echo $?` | 0이면 user 매니저 경유 제한 가능 |
+| C7 | 시스템 서비스 수준 제한 동작 | `sudo systemd-run --wait --collect -p MemoryMax=64M -p CPUQuota=50% sh -c 'cat /proc/self/cgroup; cat /sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)/memory.max'` | `67108864` 출력되면 memory 제한 가능. systemd-run 자체가 동작하면 격리 모드 A(execd 경로, security.md 11.2) |
+| C8 | needrestart | `dpkg -l needrestart; grep -rh 'nrconf{restart}' /etc/needrestart/ 2>/dev/null` | 설치 여부·모드 기록. `apt.*` root_op은 `NEEDRESTART_MODE=l`로 자동 재시작을 막는다([security.md](./security.md) 9.4) |
+| C9 | setuid/setgid 바이너리 | `find / -xdev -perm /6000 -type f 2>/dev/null` | 목록 기록, 불필요한 것 제거 검토. 격리 모드 B 노드는 필수([security.md](./security.md) 11.2) |
 | C10 | 메모리 | `free -m; grep -E 'MemTotal\|CmaTotal' /proc/meminfo` | 6장 공식 입력값 |
 | C11 | CPU | `lscpu \| grep -E 'Model name\|MHz\|^CPU\(s\)'` | 클럭 기록 |
 | C12 | 스왑 | `swapon --show; zramctl` | SD 스왑 사용 여부 |
@@ -427,7 +464,7 @@ sequenceDiagram
 | C18 | time-sync 대기 유닛 | `systemctl list-unit-files \| grep -E 'chrony-wait\|time-wait-sync'` | 사용할 유닛 이름 확정 |
 | C19 | agent 의존성 apt 제공 | `apt-cache policy python3-psutil python3-websockets python3-yaml` | 버전 기록 (pip 불필요 여부) |
 | C20 | 복전 시 자동 부팅 | 전원 분리 → 재연결 후 SSH 접속 시간 측정 | 자동 부팅 여부, 부팅 시간 |
-| C21 | 네트워크 설정 방식 | `ls /etc/netplan/ 2>/dev/null; systemctl is-active NetworkManager systemd-networkd` | 정적 IP/VIP 설정 도구 확정 |
+| C21 | 네트워크 설정 방식 | `ls /etc/netplan/ 2>/dev/null; systemctl is-active NetworkManager systemd-networkd` | 정적 IP/VIP 설정 도구 확정. VIP 보조 주소가 DHCP 갱신·`nmcli con up` 후에도 유지되는지 확인(3.3) |
 
 **Raspberry Pi 3B 전용**
 
@@ -509,6 +546,6 @@ flowchart LR
 | 7. 보안 하드닝 | 방화벽, SSH 설정, 불필요 서비스 제거, 계정, 외부 접속 경로 → **[security.md](./security.md)** | 전체 |
 | 8. Phase 0 기록 | 8장 체크리스트 실행, `docs/phase0/<hostname>.md` 작성, 6장 예산과 1.2절 용량 재계산 | 전체 |
 | 9. master 설치 | rdkx3-01: `install_master.sh`, `cluster-vip` enable, 내부 인증서, master 계열 서비스 enable. rdkx3-02: 같은 패키지를 설치하고 master 계열 서비스 mask, `cluster-backup` 수신 계정 생성, 첫 백업 복제 확인 | rdkx3-01, rdkx3-02 |
-| 10. agent 설치 | admin이 웹에서 노드 등록 → 토큰 발급 → `install_agent.sh --master wss://master.cluster.internal/ws/agent --token <TOKEN>`. 계정(`cluster-agent`, `cluster-run`) 생성과 권한 설정은 설치 스크립트가 [security.md](./security.md) 규칙대로 수행. Pi는 P7 재확인 | 전체 (rdkx3-01 포함) |
+| 10. agent 설치 | admin이 웹에서 노드 등록(step-up) → 토큰 1회 표시 → 노드에서 `read -rs T && printf %s "$T" \| sudo ./install_agent.sh --master wss://master.cluster.internal/ws/agent --ca ca.pem --token-file -` (토큰은 **stdin으로만**: 셸 히스토리·`ps`·`/proc/*/cmdline`에 남지 않게, [security.md](./security.md) 12.1). 계정(`cluster-agent`, `cluster-run`) 생성, cluster-execd·policy.yaml 설치, 권한 설정은 설치 스크립트가 security.md 규칙대로 수행. 첫 접속 후 웹에서 레이블·용량 확정(1.2절). Pi는 P7 재확인 | 전체 (rdkx3-01 포함) |
 
 완료 기준: 5대 모두 대시보드에 online, 레이블/용량이 1.2절과 일치, 전체 재부팅 후 자동 복귀, rdkx3-02에 암호화 백업이 1시간 주기로 쌓임.
