@@ -81,7 +81,7 @@ def _merge(sample: Dict[str, Any], part: Dict[str, Any]) -> None:
     for key, value in part.items():
         if key == "extra":
             sample["extra"].update(value or {})
-        elif key == "temp_c" and value is None:
+        elif key == "temp_c" and value is None and sample.get("temp_c") is not None:
             continue  # a board collector without a reading must not erase the generic one
         else:
             sample[key] = value

@@ -44,9 +44,9 @@ def build_labels(
     mem_total = static_info.get("mem_total")
     labels: Dict[str, str] = {
         "board": board,
-        "arch": platform.machine(),
+        "arch": str(static_info.get("arch") or platform.machine()),
         "bpu": str(static_info.get("bpu_cores") or 0),
-        "cpus": str(os.cpu_count() or 1),
+        "cpus": str(static_info.get("cpu_count") or os.cpu_count() or 1),
         "node_role": "worker",
         "storage": "sd",
     }

@@ -1,0 +1,7 @@
+# Interactive commands (docs/design/security.md 11.1): no slice memory cap, so maintenance
+# commands are never blocked by jobs.
+[Unit]
+Description=Cluster Web commands
+
+[Slice]
+TasksMax=1024

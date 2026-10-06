@@ -65,15 +65,7 @@ class MockCollector(Collector):
         if self.board == "rdkx3":
             extra["bpu"] = [self.rng.randint(0, 60), self.rng.randint(0, 60)]
         else:
-            extra["throttled"] = {
-                "raw": "0x0",
-                "now": dict.fromkeys(
-                    ("under_voltage", "freq_capped", "throttled", "soft_temp_limit"), False
-                ),
-                "since_boot": dict.fromkeys(
-                    ("under_voltage", "freq_capped", "throttled", "soft_temp_limit"), False
-                ),
-            }
+            extra["throttled"] = "0x0"
         return {
             "cpu": {
                 "percent": round(sum(per_core) / len(per_core), 1),

@@ -1,0 +1,25 @@
+# One short-lived broker per agent connection. Runs are delegated to PID 1 (systemd-run), so
+# the broker itself can be confined. Policy: /etc/cluster-execd/policy.yaml (root, read-only).
+[Unit]
+Description=Cluster Web execution broker (connection %i)
+CollectMode=inactive-or-failed
+
+[Service]
+Type=simple
+ExecStart=/opt/cluster-execd/venv/bin/cluster-execd
+User=root
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/cluster-run /run/cluster-execd
+ProtectHome=yes
+PrivateNetwork=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictRealtime=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+# The exact minimal set that still lets systemd-run work is confirmed in Phase 1 (security.md 9.6)

@@ -108,3 +108,9 @@ def test_default_capacity_matches_topology_table(board, role, mem_mb, expected):
 def test_configured_capacity_wins():
     cap = build_capacity("rpi3", {"mem_mb": "948"}, {"slots": 1})
     assert cap == {"slots": 1, "bpu_slots": 0, "job_mem_mb": 512}
+
+
+@pytest.mark.parametrize("node_id", ["rpi3-01\n", "rpi3-01\n\n"])
+def test_trailing_newline_rejected(node_id):
+    with pytest.raises(ConfigError, match="node_id"):
+        parse_config({**BASE, "node_id": node_id})

@@ -85,7 +85,11 @@ class CommonCollector(Collector):
         }
 
     def collect_slow(self) -> Dict[str, Any]:
-        return {"top": safe(_top_processes, [], what="top")}
+        return {
+            "top": safe(_top_processes, [], what="top"),
+            # unattended-upgrades leaves this behind when a reboot is needed (security.md 17)
+            "extra": {"reboot_required": self.sysfs.exists("/run/reboot-required")},
+        }
 
     def _cpu(self) -> Dict[str, Any]:
         per_core = psutil.cpu_percent(percpu=True)

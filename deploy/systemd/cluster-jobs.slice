@@ -1,0 +1,8 @@
+# Queued jobs (docs/design/jobs.md 9.2). MemoryMax = job_mem_mb (rpi3 default below; per-node value: Phase 6 installer).
+[Unit]
+Description=Cluster Web jobs
+
+[Slice]
+MemoryMax=384M
+CPUWeight=50
+TasksMax=1024

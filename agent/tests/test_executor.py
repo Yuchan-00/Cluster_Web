@@ -19,9 +19,8 @@ class Sink:
 
 
 def make_executor(**kw):
-    kw.setdefault("kill_grace", 1.0)
     kw.setdefault("flush_interval", 0.05)
-    return Executor(DirectLauncher(), **kw)
+    return Executor(DirectLauncher(kill_grace=1.0), **kw)
 
 
 async def test_success_and_streams():
@@ -145,6 +144,54 @@ async def test_multibyte_utf8_split_across_reads():
     assert sink.text() == "한글" * 3000
 
 
-async def test_missing_cwd_fails_to_start():
-    res = await make_executor().run(ExecRequest("r1", command="true", cwd="/nonexistent/x"), Sink())
+async def test_missing_program_fails_to_start():
+    res = await make_executor().run(ExecRequest("r1", argv=["/nonexistent/prog"]), Sink())
     assert res.status == "failed_to_start"
+
+
+async def test_root_op_needs_execd():
+    res = await make_executor().run(ExecRequest("r1", root_op="system.reboot"), Sink())
+    assert res.status == "rejected" and "execd" in res.reason
+
+
+def test_exec_message_mapping():
+    shell = ExecRequest.from_message(
+        {
+            "type": "exec",
+            "run_id": "r9",
+            "mode": "shell",
+            "command": "uptime",
+            "limits": {"memory_mb": 64},
+            "timeout": 30,
+            "network": "none",
+        }
+    )
+    assert shell.to_execd() == {
+        "v": 1,
+        "run_id": "r9",
+        "kind": "command",
+        "mode": "shell",
+        "command": "uptime",
+        "as_root": False,
+        "network": "none",
+        "limits": {"memory_mb": 64, "timeout_s": 30},
+        "env": {},
+    }
+    op = ExecRequest.from_message(
+        {
+            "type": "exec",
+            "run_id": "r10",
+            "root_op": "logs.journal",
+            "params": {"unit": "ssh", "lines": 50},
+            "argv": ["evil"],
+        }
+    )
+    assert op.to_execd()["kind"] == "root_op" and "argv" not in op.to_execd()
+    with pytest.raises(ValueError):
+        ExecRequest.from_message({"run_id": "r11", "mode": "bogus"})
+    assert (
+        ExecRequest.from_message(
+            {"run_id": "r", "mode": "shell", "command": "x", "as_root": "yes"}
+        ).as_root
+        is False
+    )

@@ -8,21 +8,38 @@ permissions:
   contents: read
 
 jobs:
-  agent:
-    name: agent (Python ${{ matrix.python }})
+  python:
+    name: ${{ matrix.package }} (Python ${{ matrix.python }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
+        package: [agent, execd]
         # 3.8: RDK X3 Ubuntu 20.04 images. 3.11/3.13: Raspberry Pi OS bookworm/trixie.
         python: ["3.8", "3.11", "3.13"]
     defaults:
       run:
-        working-directory: agent
+        working-directory: ${{ matrix.package }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
       - name: Lint
-        run: uvx ruff check . && uvx ruff format --check .
+        run: uvx ruff@0.16.10 check . && uvx ruff@0.16.10 format --check .
       - name: Test
-        run: uv run --locked --python ${{ matrix.python }} --extra dev -- python -m pytest -q
+        run: uv run --locked --python ${{ matrix.python }} --extra dev -- python -m pytest -q -rs
+
+  execd-privileged:
+    # uid switching, collect attacks and isolation mode A need root and a real systemd,
+    # which the runner VM has (docs/design/security.md 11.2, Phase 1 checklist).
+    name: execd (root + systemd)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+      - name: Root and systemd tests
+        working-directory: execd
+        # System python: the collect worker re-executes it as the unprivileged run user.
+        run: >
+          sudo env "PATH=$PATH" "HOME=$HOME"
+          uv run --python /usr/bin/python3 --extra dev --
+          python -m pytest -q -rs -m "root or systemd"

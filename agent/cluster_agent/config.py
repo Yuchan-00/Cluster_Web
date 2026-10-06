@@ -51,7 +51,7 @@ class AgentConfig:
     allow_insecure_loopback: bool = False
 
     def validate(self) -> None:
-        if not _NODE_ID.match(self.node_id):
+        if not _NODE_ID.fullmatch(self.node_id):
             raise ConfigError("node_id must be lowercase letters, digits and '-' (max 63)")
         url = urlparse(self.master_url)
         loopback = url.hostname in ("localhost", "127.0.0.1", "::1")
@@ -68,7 +68,7 @@ class AgentConfig:
         if not 1 <= self.slow_every <= 60:
             raise ConfigError("slow_every must be between 1 and 60")
         for key, value in self.labels.items():
-            if not _LABEL_KEY.match(str(key)) or not _LABEL_VALUE.match(str(value)):
+            if not _LABEL_KEY.fullmatch(str(key)) or not _LABEL_VALUE.fullmatch(str(value)):
                 raise ConfigError(f"invalid label {key!r}={value!r}")
         for key, value in self.capacity.items():
             if key not in _CAPACITY_KEYS:

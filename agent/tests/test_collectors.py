@@ -65,17 +65,14 @@ def test_rpi_collector_uses_vcgencmd(make_sysfs, fake_runner):
         }
     )
     c = RpiCollector(make_sysfs({}), runner)
-    assert c.collect()["extra"]["throttled"]["now"]["under_voltage"] is True
+    assert c.collect()["extra"]["throttled"] == "0x1"
     assert c.collect_slow()["extra"]["core_volts"] == 1.2875
 
 
 def test_rpi_collector_falls_back_to_firmware_sysfs(make_sysfs, fake_runner):
     sysfs = make_sysfs({"/sys/devices/platform/soc/soc:firmware/get_throttled": "50000\n"})
     c = RpiCollector(sysfs, fake_runner())  # vcgencmd unavailable
-    throttled = c.collect()["extra"]["throttled"]
-    assert throttled["raw"] == "0x50000"
-    assert throttled["now"]["under_voltage"] is False
-    assert throttled["since_boot"]["under_voltage"] is True
+    assert c.collect()["extra"]["throttled"] == "0x50000"
 
 
 def test_rpi_collector_without_any_source(make_sysfs, fake_runner):
@@ -210,4 +207,4 @@ def test_mock_collector_shapes():
     assert rdk.static_info()["board"] == "rdkx3"
     assert len(rdk.collect()["extra"]["bpu"]) == 2
     pi = MetricsCollector(board="rpi3", mock_name="rpi3-01")
-    assert pi.collect()["extra"]["throttled"]["raw"] == "0x0"
+    assert pi.collect()["extra"]["throttled"] == "0x0"

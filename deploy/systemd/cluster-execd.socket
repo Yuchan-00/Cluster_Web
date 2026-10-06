@@ -1,0 +1,17 @@
+# Root execution broker socket (docs/design/security.md 9.3). Only cluster-agent can connect;
+# execd re-checks the peer uid with SO_PEERCRED.
+[Unit]
+Description=Cluster Web execution broker socket
+
+[Socket]
+ListenStream=/run/cluster-execd.sock
+SocketUser=root
+SocketGroup=cluster-agent
+SocketMode=0660
+Accept=yes
+# slots + bpu_slots + command concurrency + 4 (security.md 9.3); per-node value: Phase 6 installer
+MaxConnections=16
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

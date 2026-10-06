@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cluster-execd"
+version = "0.1.0"
+description = "Cluster Web root execution broker: runs agent requests under a node-local policy"
+readme = "README.md"
+# Runs on every node, including RDK X3 images with Python 3.8.
+requires-python = ">=3.8"
+dependencies = ["PyYAML>=5.3"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7", "pytest-asyncio>=0.21"]
+
+[project.scripts]
+cluster-execd = "cluster_execd.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["cluster_execd*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+markers = [
+    "root: needs euid 0 to create users and switch uid",
+    "systemd: needs systemd as PID 1 (runs in CI under sudo)",
+]
+
+[tool.ruff]
+target-version = "py38"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "BLE"]
+ignore = [
+    "S603",  # subprocess without shell: every argv is built from validated policy/request fields
+    "UP006",
+    "UP007",
+    "UP035",
+    "UP045",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101", "S103", "S108", "S607"]

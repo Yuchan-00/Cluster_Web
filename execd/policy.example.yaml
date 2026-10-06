@@ -1,0 +1,52 @@
+# /etc/cluster-execd/policy.yaml  (root:root 0644, directory root:root 0755)
+#
+# Node-local execution policy (docs/design/security.md 9.4). This file is the defence line
+# that survives a compromised master: change it only over SSH/Ansible, never from the web UI.
+# Validate after editing:  sudo cluster-execd --check-policy
+
+allow_shell: true              # cluster-run shell commands and arbitrary-code jobs
+allow_as_root_shell: false     # arbitrary root shell; enable only on nodes that need it
+
+# isolation: auto             # auto | systemd | fallback (fallback only when systemd-run is unusable)
+# lan_cidrs: [192.168.1.0/24] # needed for network=lan runs
+
+root_ops:                      # the master calls these by id only; argv/env/mode are fixed here
+  system.reboot:   { argv: [/usr/bin/systemctl, reboot],   detach: true }
+  system.poweroff: { argv: [/usr/bin/systemctl, poweroff], detach: true }
+  agent.restart:   { argv: [/usr/bin/systemctl, restart, cluster-agent], detach: true }
+  service.restart:
+    argv: [/usr/bin/systemctl, restart, "{unit}"]
+    params: { unit: { enum: [docker] } }
+  apt.update:
+    argv: [/usr/bin/apt-get, update]
+    survive_disconnect: true
+    env: { DEBIAN_FRONTEND: noninteractive, NEEDRESTART_MODE: l }
+  apt.upgrade:
+    argv: [/usr/bin/apt-get, -y, -o, "Dpkg::Options::=--force-confold", upgrade]
+    survive_disconnect: true
+    env: { DEBIAN_FRONTEND: noninteractive, NEEDRESTART_MODE: l }
+  maint.apt_clean: { argv: [/usr/bin/apt-get, clean], survive_disconnect: true }
+  maint.journal_vacuum:
+    argv: [/usr/bin/journalctl, "--vacuum-size={size}"]
+    params: { size: { enum: [50M, 100M, 200M] } }
+  logs.journal:                # includes ssh authentication records: never AI auto-approved
+    argv: [/usr/bin/journalctl, --no-pager, -u, "{unit}", -n, "{lines}"]
+    params: { unit: { enum: [cluster-agent, ssh] }, lines: { int: [10, 1000] } }
+    env: { SYSTEMD_PAGER: cat }
+    readonly: true
+  diag.journal_err:            # auth/authpriv facilities excluded (systemd 245+, Phase 0)
+    argv: [/usr/bin/journalctl, --no-pager, -p, err, -n, "{lines}", "--facility=kern,user,daemon,syslog,cron"]
+    params: { lines: { int: [10, 500] } }
+    env: { SYSTEMD_PAGER: cat }
+    readonly: true
+  diag.dmesg:
+    argv: [/usr/bin/journalctl, --no-pager, -k, -p, warning, -n, "{lines}"]
+    params: { lines: { int: [10, 500] } }
+    env: { SYSTEMD_PAGER: cat }
+    readonly: true
+
+limits_max:                    # filled per board by the install script (topology.md 6)
+  memory_mb: 384               # rpi3 example (= job_mem_mb)
+  cpu_pct: 400
+  tasks: 256
+  timeout_s: 86400

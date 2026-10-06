@@ -1,0 +1,47 @@
+# Cluster Web node agent (docs/design/security.md 9.6). Installed by deploy/install_agent.sh.
+# No sudo anywhere: privileged work goes through cluster-execd.socket.
+[Unit]
+Description=Cluster Web node agent
+After=network-online.target time-sync.target cluster-execd.socket
+Wants=network-online.target time-sync.target cluster-execd.socket
+
+[Service]
+Type=simple
+User=cluster-agent
+Group=cluster-agent
+# Raspberry Pi: vcgencmd needs /dev/vchiq (topology.md P7)
+SupplementaryGroups=video
+ExecStart=/opt/cluster-agent/venv/bin/cluster-agent --config /etc/cluster-agent/config.yaml
+Restart=always
+RestartSec=5
+StateDirectory=cluster-agent
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/cluster-agent
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+# topology.md 6.2: the agent must survive memory pressure; jobs die first
+MemoryMax=80M
+OOMScoreAdjust=-800
+
+[Install]
+WantedBy=multi-user.target

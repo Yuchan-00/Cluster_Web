@@ -48,8 +48,9 @@ class RpiCollector(Collector):
         self.run_cmd = run_cmd
 
     def collect(self) -> Dict[str, Any]:
+        # Sent raw ("0x50005"); the master decodes it with the bit table above.
         value = self._throttled()
-        return {"extra": {"throttled": decode_throttled(value) if value is not None else None}}
+        return {"extra": {"throttled": hex(value) if value is not None else None}}
 
     def collect_slow(self) -> Dict[str, Any]:
         volts = parse_volts(self.run_cmd(["vcgencmd", "measure_volts", "core"], _VCGENCMD_TIMEOUT))
