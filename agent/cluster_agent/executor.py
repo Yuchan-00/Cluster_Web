@@ -22,6 +22,9 @@ log = logging.getLogger(__name__)
 OutputSink = Callable[[str, str], Awaitable[None]]
 
 SAFE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+# Output chunks buffered per run. Bounded so that a stalled master link pushes back on the
+# process (its pipe fills and it blocks) instead of growing the agent's memory (MemoryMax=80M).
+OUTPUT_QUEUE_CHUNKS = 16
 TRUNCATION_NOTICE = "\n[cluster-agent] output limit reached; further output discarded\n"
 NETWORKS = ("internet", "lan", "none")
 _LIMIT_KEYS = ("memory_mb", "cpu_pct", "tasks", "timeout_s")
@@ -84,14 +87,20 @@ class ExecRequest:
         return None
 
     @classmethod
-    def from_message(cls, msg: Dict[str, Any]) -> ExecRequest:
+    def from_message(cls, msg: Dict[str, Any], default_timeout: float = 60.0) -> ExecRequest:
         """Build a request from the master's `exec` message (docs/PLAN.md 12.1)."""
         limits = msg.get("limits") or {}
         if not isinstance(limits, dict):
             raise ValueError("limits must be an object")
-        timeout = msg.get("timeout", limits.get("timeout_s", 60))
+        timeout = msg.get("timeout", limits.get("timeout_s", default_timeout))
         if not isinstance(timeout, (int, float)) or isinstance(timeout, bool):
             raise ValueError("timeout must be a number")
+        try:
+            timeout = float(timeout)
+        except OverflowError as exc:
+            raise ValueError("timeout out of range") from exc
+        if timeout != timeout:  # NaN
+            raise ValueError("timeout out of range")
         mode = msg.get("mode")
         root_op = msg.get("root_op")
         if root_op is None and mode not in ("shell", "preset"):
@@ -103,7 +112,7 @@ class ExecRequest:
             root_op=root_op,
             params=msg.get("params") or {},
             as_root=msg.get("as_root") is True,
-            timeout=float(timeout),
+            timeout=timeout,
             limits={k: v for k, v in limits.items() if k != "timeout_s"},
             network=msg.get("network", "internet"),
             env=msg.get("env") or {},
@@ -213,7 +222,7 @@ class _DirectRun(RunHandle):
     def __init__(self, proc: asyncio.subprocess.Process, timeout: float, grace: float) -> None:
         self.proc = proc
         self.grace = grace
-        self.queue: asyncio.Queue[Optional[Tuple[str, bytes]]] = asyncio.Queue()
+        self.queue: asyncio.Queue[Optional[Tuple[str, bytes]]] = asyncio.Queue(OUTPUT_QUEUE_CHUNKS)
         self.cancelled = False
         self.timed_out = False
         self.readers = [
@@ -313,18 +322,20 @@ class Executor:
         self._cancelled: Dict[str, bool] = {}
 
     def running(self) -> List[str]:
-        return list(self._handles)
+        """Runs being started or running (both must be visible to cancel and to hello)."""
+        return list(self._reserved)
 
     async def cancel(self, run_id: str) -> bool:
-        handle = self._handles.get(run_id)
-        if handle is None:
+        if run_id not in self._reserved:
             return False
-        self._cancelled[run_id] = True
-        await handle.cancel()
+        self._cancelled[run_id] = True  # honoured right after start if still starting
+        handle = self._handles.get(run_id)
+        if handle is not None:
+            await handle.cancel()
         return True
 
     async def cancel_all(self) -> None:
-        await asyncio.gather(*(self.cancel(r) for r in list(self._handles)))
+        await asyncio.gather(*(self.cancel(r) for r in list(self._reserved)))
 
     async def run(self, req: ExecRequest, sink: OutputSink) -> ExecResult:
         started = time.monotonic()
@@ -345,11 +356,14 @@ class Executor:
             return await self._drive(req, handle, sink, started)
         finally:
             self._reserved.pop(req.run_id, None)
+            self._cancelled.pop(req.run_id, None)
 
     async def _drive(
         self, req: ExecRequest, handle: RunHandle, sink: OutputSink, started: float
     ) -> ExecResult:
         self._handles[req.run_id] = handle
+        if self._cancelled.get(req.run_id):  # cancel or lockdown arrived while starting
+            await handle.cancel()
         out = _OutputPump(sink, self.max_output_bytes, self.flush_interval, self.flush_bytes)
         feeder = asyncio.ensure_future(_feed(handle, out))
         ticker = asyncio.ensure_future(out.tick())

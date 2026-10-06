@@ -36,9 +36,14 @@ CLOSE_DUPLICATE = 4409
 CLOSE_RATE = 4429
 
 
-def make_ssl_context(ca_file: str) -> ssl.SSLContext:
+def make_ssl_context(ca_file: Optional[str]) -> ssl.SSLContext:
     """Trust only the cluster's internal CA (never the system store) and check the hostname."""
-    ctx = ssl.create_default_context(ssl.Purpose.SERVER_AUTH, cafile=ca_file)
+    if not ca_file:  # create_default_context(cafile=None) would load the system store
+        raise ConfigError("a CA file is required for wss:// (the cluster's internal CA)")
+    try:
+        ctx = ssl.create_default_context(ssl.Purpose.SERVER_AUTH, cafile=ca_file)
+    except (OSError, ssl.SSLError) as exc:
+        raise ConfigError(f"cannot load CA file {ca_file}: {exc}") from exc
     ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     ctx.check_hostname = True
     ctx.verify_mode = ssl.CERT_REQUIRED

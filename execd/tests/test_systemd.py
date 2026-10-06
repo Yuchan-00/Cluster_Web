@@ -38,6 +38,8 @@ def systemd_ctx(policy, run_user):
     )
     for d in (paths.agent_root, paths.agent_etc, paths.execd_etc):
         os.makedirs(d, mode=0o755)
+    with open(paths.execd_socket, "w") as f:  # stands in for the socket
+        f.write("")
     with open(os.path.join(paths.agent_etc, "agent.token"), "w") as f:
         f.write("secret")
     yield Context(policy=policy, paths=paths, run_user=run_user, isolation="systemd")
@@ -68,6 +70,7 @@ async def test_sandbox_properties(make_server, systemd_ctx):
             f"ls {systemd_ctx.paths.work_root}",
             "grep NoNewPrivs /proc/self/status",
             f"cat {systemd_ctx.paths.agent_etc}/agent.token || echo token:denied",
+            f"cat {systemd_ctx.paths.execd_socket} || echo socket:denied",
             "touch /usr/local/x 2>/dev/null || echo rootfs:readonly",
             "touch ./ok && echo workdir:writable",
         ]
@@ -77,6 +80,7 @@ async def test_sandbox_properties(make_server, systemd_ctx):
     assert out.splitlines()[0] == "sd_2"  # other runs' directories are hidden
     assert "NoNewPrivs:\t1" in out
     assert "token:denied" in out and "secret" not in out
+    assert "socket:denied" in out
     assert "rootfs:readonly" in out
     assert "workdir:writable" in out
     assert last(events, "exit")["status"] == "ok", events
@@ -110,3 +114,10 @@ async def test_cancel_stops_whole_unit(make_server, systemd_ctx):
         ["pgrep", "-u", systemd_ctx.run_user, "-f", "sleep 60"], capture_output=True, text=True
     ).stdout.strip()
     assert leftovers == ""
+
+
+async def test_memory_limit_maps_to_oom(make_server, systemd_ctx):
+    client = await make_server(systemd_ctx)
+    hog = "python3 -c \"x = b'a' * (300 * 1024 * 1024)\""
+    events = await client.call(shell(hog, "sd_6", limits={"memory_mb": 64}))
+    assert last(events, "exit")["status"] == "oom", events

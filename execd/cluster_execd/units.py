@@ -73,8 +73,13 @@ def _sandbox(plan: ExecPlan, paths: Paths, run_user: str) -> List[str]:
         f"BindPaths={workdir}",
         f"ReadWritePaths={workdir}",
         f"WorkingDirectory={workdir}",
+        # "-": a path that does not exist on this node has nothing to hide (and would otherwise
+        # make the unit fail to start).
         "InaccessiblePaths="
-        + " ".join([paths.agent_etc, paths.agent_root, paths.execd_etc, paths.execd_socket]),
+        + " ".join(
+            "-" + p
+            for p in (paths.agent_etc, paths.agent_root, paths.execd_etc, paths.execd_socket)
+        ),
         "ProtectKernelTunables=yes",
         "ProtectKernelModules=yes",
         "ProtectControlGroups=yes",
@@ -105,14 +110,15 @@ def run_argv(plan: ExecPlan, paths: Paths, run_user: str, lan_cidrs: List[str]) 
         paths.systemd_run,
         f"--unit={unit_name(plan.run_id)}",
         f"--slice={CMD_SLICE}",
-        "--collect",
         "--quiet",
     ]
     if plan.detach:
         # Disconnecting operations (reboot, agent restart) are only scheduled; the reply goes
         # out before they take effect.
-        argv += [f"--on-active={DETACH_DELAY}", "--no-block"]
+        argv += [f"--on-active={DETACH_DELAY}", "--no-block", "--collect"]
     else:
+        # No --collect: a failed unit stays loaded so execd can read Result (oom-kill, timeout,
+        # exit code) and then runs reset-failed.
         argv += ["--pipe", "--wait"]
     for prop in props:
         argv += ["-p", prop]

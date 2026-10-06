@@ -24,7 +24,8 @@ def test_sandboxed_command_unit():
     argv = run_argv(plan_for(limits={"memory_mb": 128, "timeout_s": 30}), PATHS, "cluster-run", [])
     assert argv[:2] == ["/usr/bin/systemd-run", "--unit=cluster-run-r_42.service"]
     assert "--slice=cluster-cmd.slice" in argv
-    assert "--pipe" in argv and "--wait" in argv and "--collect" in argv
+    assert "--pipe" in argv and "--wait" in argv
+    assert "--collect" not in argv  # failed units stay loaded for Result, then reset-failed
     p = props(argv)
     for expected in [
         "User=cluster-run",
@@ -37,8 +38,8 @@ def test_sandboxed_command_unit():
         "TemporaryFileSystem=/var/lib/cluster-run/work",
         "BindPaths=/var/lib/cluster-run/work/r_42",
         "WorkingDirectory=/var/lib/cluster-run/work/r_42",
-        "InaccessiblePaths=/etc/cluster-agent /var/lib/cluster-agent /etc/cluster-execd "
-        "/run/cluster-execd.sock",
+        "InaccessiblePaths=-/etc/cluster-agent -/var/lib/cluster-agent -/etc/cluster-execd "
+        "-/run/cluster-execd.sock",
         "MemoryMax=128M",
         "MemorySwapMax=0",
         "RuntimeMaxSec=30",
@@ -61,7 +62,7 @@ def test_as_root_shell_has_no_sandbox_user():
 
 def test_detached_root_op_is_scheduled_not_waited():
     argv = run_argv(plan_for(kind="root_op", root_op="system.reboot"), PATHS, "cluster-run", [])
-    assert "--on-active=3s" in argv and "--no-block" in argv
+    assert "--on-active=3s" in argv and "--no-block" in argv and "--collect" in argv
     assert "--pipe" not in argv and "--wait" not in argv
     assert argv[-3:] == ["--", "/usr/bin/systemctl", "reboot"]
 

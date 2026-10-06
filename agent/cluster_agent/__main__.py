@@ -110,6 +110,7 @@ async def build_real(cfg: AgentConfig, socket_path: str) -> Agent:
         static_extra=extra,
         ssl_ctx=ssl_ctx,
         metrics_interval=cfg.metrics_interval,
+        command_limits=cfg.commands,
     )
 
 

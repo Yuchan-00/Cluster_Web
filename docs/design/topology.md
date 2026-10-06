@@ -548,6 +548,6 @@ flowchart LR
 | 7. 보안 하드닝 | 방화벽, SSH 설정, 불필요 서비스 제거, 계정, 외부 접속 경로 → **[security.md](./security.md)** | 전체 |
 | 8. Phase 0 기록 | 8장 체크리스트 실행, `docs/phase0/<hostname>.md` 작성, 6장 예산과 1.2절 용량 재계산 | 전체 |
 | 9. master 설치 | rdkx3-01: `install_master.sh`, `cluster-vip` enable, 내부 인증서, master 계열 서비스 enable. rdkx3-02: 같은 패키지를 설치하고 master 계열 서비스 mask, `cluster-backup` 수신 계정 생성, 첫 백업 복제 확인 | rdkx3-01, rdkx3-02 |
-| 10. agent 설치 | admin이 웹에서 노드 등록(step-up) → 토큰 1회 표시 → 노드에서 `read -rs T && printf %s "$T" \| sudo ./install_agent.sh --master wss://master.cluster.internal/ws/agent --ca ca.pem --token-file -` (토큰은 **stdin으로만**: 셸 히스토리·`ps`·`/proc/*/cmdline`에 남지 않게, [security.md](./security.md) 12.1). 계정(`cluster-agent`, `cluster-run`) 생성, cluster-execd·policy.yaml 설치, 권한 설정은 설치 스크립트가 security.md 규칙대로 수행. 첫 접속 후 웹에서 레이블·용량 확정(1.2절). Pi는 P7 재확인 | 전체 (rdkx3-01 포함) |
+| 10. agent 설치 | admin이 웹에서 노드 등록(step-up) → 토큰 1회 표시 → 노드에서 `read -rs T && printf %s "$T" \| sudo ./install_agent.sh --node-id <호스트명> --master wss://master.cluster.internal/ws/agent --ca ca.pem --token-file -` (토큰은 **stdin으로만**: 셸 히스토리·`ps`·`/proc/*/cmdline`에 남지 않게, [security.md](./security.md) 12.1). 계정(`cluster-agent`, `cluster-run`) 생성, cluster-execd·policy.yaml 설치, 권한 설정은 설치 스크립트가 security.md 규칙대로 수행. 첫 접속 후 웹에서 레이블·용량 확정(1.2절). Pi는 P7 재확인 | 전체 (rdkx3-01 포함) |
 
 완료 기준: 5대 모두 대시보드에 online, 레이블/용량이 1.2절과 일치, 전체 재부팅 후 자동 복귀, rdkx3-02에 암호화 백업이 1시간 주기로 쌓임.

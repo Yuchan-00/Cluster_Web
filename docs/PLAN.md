@@ -421,7 +421,7 @@ JSON 메시지, 모든 메시지에 `type` 필드. 토큰은 메시지가 아니
 
 | 방향 | type | 주요 필드 | 상세 |
 |---|---|---|---|
-| A→M | `hello` | node_id, board, agent_version, static_info(레이블·용량 보고값, isolation, datasets), running_tasks, unacked_results(`task_result`·`cmd_result`), orphaned | security.md 8장, jobs.md 13.1 |
+| A→M | `hello` | node_id, board, agent_version, static_info(레이블·용량 보고값, isolation, node_policy 요약, datasets), running_tasks, unacked_results(`task_result`, `survive_disconnect` root_op의 `cmd_result`), orphaned, running_commands(시작 중·실행 중 명령 run_id), pending_results(끊긴 동안 끝난 명령 run_id — `cmd_result`는 welcome 직후 전달되므로 master는 이 run을 lost로 처리하지 않음) | security.md 8장, jobs.md 13.1 |
 | A→M | `metrics` | ts, cpu, mem, disk, net, temp_c, extra(허용 키), sched | 7장, jobs.md 5.1 |
 | A→M | `cmd_output` / `cmd_result` | run_id, stream, data / status(`ok`·`timeout`·`cancelled`·`error`·`scheduled`), exit_code, duration_ms | 8.3 |
 | A→M | `task_accept` · `task_reject` · `task_progress` · `task_output` · `task_result` · `work_request` | attempt_id 펜싱 | jobs.md 13.3 |
@@ -639,7 +639,7 @@ Cluster_Web/
 | 웹 | CI에서 `npm ci --ignore-scripts && npm run build` → 릴리스 산출물 + `SHA256SUMS` → master에서 체크섬 검증 후 설치, FastAPI가 정적 파일 서빙(SPA fallback) |
 | 외부 접속 | `tailscale up --advertise-tags=tag:cluster-master --ssh=false …`, `tailscale serve --bg --https=443 http://127.0.0.1:8000`. **Phase 3·4 보안 체크 통과 전에는 serve를 켜지 않음** |
 | agent TLS | Caddy가 VIP:443에서 `master.cluster.internal` 인증서(내부 CA, 관리 PC에서 서명)로 종료. `caddy.service`는 `cluster-vip.service` 뒤에 시작 |
-| agent | 웹에서 노드 등록(step-up) → 토큰 1회 표시 → `read -rs T && printf %s "$T" \| sudo ./install_agent.sh --master wss://master.cluster.internal/ws/agent --ca ca.pem --token-file -`. 스크립트가 `cluster-agent`·`cluster-run` 계정, `python3-psutil` 등 apt 의존성, `/etc/cluster-agent/{config.yaml,agent.token 0600,ca.pem}`, cluster-execd·policy.yaml, nftables, 유닛을 설치. 첫 접속 후 웹에서 레이블·용량 확정 |
+| agent | 웹에서 노드 등록(step-up) → 토큰 1회 표시 → `read -rs T && printf %s "$T" \| sudo ./install_agent.sh --node-id rpi3-01 --master wss://master.cluster.internal/ws/agent --ca ca.pem --token-file -` (재설치·토큰 교체 시 같은 명령, 다른 node_id면 `--force-config`). 스크립트가 `cluster-agent`·`cluster-run` 계정, `python3-psutil` 등 apt 의존성, `/etc/cluster-agent/{config.yaml,agent.token 0600,ca.pem}`, cluster-execd·policy.yaml, nftables, 유닛을 설치. 첫 접속 후 웹에서 레이블·용량 확정 |
 | 텔레그램·AI | `cluster-telegram.service`, `cluster-ai.service` (각자 계정, `cluster-svc` 그룹으로 UDS 접근, 봇 토큰·API 키는 각 서비스 credential만) |
 | 일괄 배포 | Ansible로 전 노드 설치·업데이트. **root 구성요소(cluster-execd, policy.yaml, nftables, sshd)는 SSH/Ansible로만** — 웹의 "agent 업데이트" 경로로 바꿀 수 없음 |
 | 업데이트 | agent 업데이트 전 drain 권장. OS 보안 패치는 unattended-upgrades(보안만, 자동 재부팅 끔). RDK 벤더 BSP는 수동 |

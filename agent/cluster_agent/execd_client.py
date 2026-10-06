@@ -16,7 +16,14 @@ import re
 import stat
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
-from .executor import ExecRequest, Launcher, LaunchFailed, LaunchRejected, RunHandle
+from .executor import (
+    OUTPUT_QUEUE_CHUNKS,
+    ExecRequest,
+    Launcher,
+    LaunchFailed,
+    LaunchRejected,
+    RunHandle,
+)
 
 DEFAULT_SOCKET = "/run/cluster-execd.sock"
 STREAM_LIMIT = 1024 * 1024  # longest event line (48KB base64 chunks fit easily)
@@ -236,7 +243,9 @@ class ExecdLauncher(Launcher):
 class _ExecdRun(RunHandle):
     def __init__(self, conn: _Conn) -> None:
         self.conn = conn
-        self.queue: asyncio.Queue[Optional[Tuple[str, bytes]]] = asyncio.Queue()
+        # Bounded: when the master link stalls, put() waits and execd stops being read, so the
+        # pressure reaches the process instead of the agent's memory.
+        self.queue: asyncio.Queue[Optional[Tuple[str, bytes]]] = asyncio.Queue(OUTPUT_QUEUE_CHUNKS)
         self.exit: asyncio.Future[Tuple[str, Optional[int], Optional[str]]] = (
             asyncio.get_running_loop().create_future()
         )
@@ -262,9 +271,10 @@ class _ExecdRun(RunHandle):
         except (ExecdError, ConnectionError, asyncio.LimitOverrunError, ValueError) as exc:
             outcome = ("error", None, f"execd stream error: {exc}")
         finally:
-            await self.queue.put(None)
+            # Result first: put() can wait on a full queue if nobody consumes any more.
             if not self.exit.done():
                 self.exit.set_result(outcome)
+            await self.queue.put(None)
 
     async def output(self) -> AsyncIterator[Tuple[str, bytes]]:
         while True:

@@ -3,7 +3,7 @@
 #
 #   read -rs T && printf %s "$T" | sudo ./install_agent.sh \
 #       --node-id rpi3-01 --master wss://master.cluster.internal/ws/agent \
-#       --ca ca.pem --token-file - [--board auto|rpi3|rdkx3] [--release DIR]
+#       --ca ca.pem --token-file - [--board auto|rpi3|rdkx3] [--release DIR] [--force-config]
 #
 # The token is accepted on stdin only, so it never appears in argv, shell history or `ps`
 # (docs/design/security.md 20, Phase 1). --release is an unpacked CI release (checksums
@@ -14,7 +14,7 @@ set -eu
 die() { echo "install_agent: $*" >&2; exit 1; }
 log() { echo "install_agent: $*"; }
 
-NODE_ID= MASTER= CA= TOKEN_FILE= BOARD=auto RELEASE=$(cd "$(dirname "$0")" && pwd)
+NODE_ID= MASTER= CA= TOKEN_FILE= BOARD=auto FORCE_CONFIG=0 RELEASE=$(cd "$(dirname "$0")" && pwd)
 while [ $# -gt 0 ]; do
     case $1 in
         --node-id) NODE_ID=$2; shift 2 ;;
@@ -23,14 +23,21 @@ while [ $# -gt 0 ]; do
         --token-file) TOKEN_FILE=$2; shift 2 ;;
         --board) BOARD=$2; shift 2 ;;
         --release) RELEASE=$2; shift 2 ;;
+        --force-config) FORCE_CONFIG=1; shift ;;
         *) die "unknown argument: $1" ;;
     esac
 done
 
 [ "$(id -u)" = 0 ] || die "run as root"
 [ "$TOKEN_FILE" = "-" ] || die "the token is read from stdin only: use --token-file -"
-printf %s "$NODE_ID" | grep -Eq '^[a-z0-9][a-z0-9-]{0,62}$' || die "invalid --node-id"
-case $MASTER in wss://*) ;; *) die "--master must be a wss:// URL" ;; esac
+# case patterns, not grep: grep matches per line, so a value with a newline could slip through
+# and inject keys into config.yaml.
+case $NODE_ID in ''|-*|*[!a-z0-9-]*) die "invalid --node-id" ;; esac
+[ ${#NODE_ID} -le 63 ] || die "invalid --node-id"
+case $MASTER in wss://?*) ;; *) die "--master must be a wss:// URL" ;; esac
+# anything left after deleting URL characters (whitespace, newlines, quotes) is rejected
+[ -z "$(printf %s "$MASTER" | tr -d 'A-Za-z0-9._~:/?#@!$&()*+,;=%-')" ] \
+    || die "--master contains invalid characters"
 [ -f "$CA" ] || die "--ca file not found"
 case $BOARD in auto|rpi3|rdkx3|generic) ;; *) die "invalid --board" ;; esac
 [ -d "$RELEASE/wheels" ] && [ -d "$RELEASE/deploy" ] && [ -f "$RELEASE/policy.example.yaml" ] \
@@ -60,8 +67,8 @@ if command -v apt-get >/dev/null; then
         python3-websockets util-linux >/dev/null
 fi
 install_venv() {  # venv name, distribution name
-    python3 -m venv --system-site-packages "/opt/$1/venv"
-    "/opt/$1/venv/bin/pip" install --no-index --find-links "$RELEASE/wheels" \
+    [ -x "/opt/$1/venv/bin/python" ] || python3 -m venv --system-site-packages "/opt/$1/venv"
+    "/opt/$1/venv/bin/pip" install --upgrade --no-index --find-links "$RELEASE/wheels" \
         --disable-pip-version-check --quiet "$2"
 }
 install_venv cluster-agent cluster-agent
@@ -77,7 +84,13 @@ chown cluster-agent:cluster-agent /etc/cluster-agent/agent.token
 chmod 0600 /etc/cluster-agent/agent.token
 unset TOKEN
 umask 022
-if [ ! -f /etc/cluster-agent/config.yaml ]; then
+if [ -f /etc/cluster-agent/config.yaml ] && [ "$FORCE_CONFIG" = 0 ]; then
+    # A reinstall with a different identity must not silently keep the old one: the new
+    # token would not match the old node_id and the master would reject the agent.
+    grep -qx "node_id: $NODE_ID" /etc/cluster-agent/config.yaml \
+        && grep -qx "master_url: $MASTER" /etc/cluster-agent/config.yaml \
+        || die "config.yaml has a different node_id/master_url; rerun with --force-config"
+else
     cat >/etc/cluster-agent/config.yaml <<CONF
 node_id: $NODE_ID
 master_url: $MASTER
@@ -107,8 +120,11 @@ install -m 0644 "$RELEASE"/deploy/systemd/cluster-agent.service \
 install -m 0644 "$RELEASE/deploy/tmpfiles/cluster-execd.conf" /etc/tmpfiles.d/
 systemd-tmpfiles --create /etc/tmpfiles.d/cluster-execd.conf
 systemctl daemon-reload
-systemctl enable --now cluster-execd.socket
-systemctl enable --now cluster-agent.service
+systemctl enable cluster-execd.socket cluster-agent.service
+# restart, not just start: a reinstall brings a new token, CA, code or unit settings that the
+# running processes only read at startup
+systemctl restart cluster-execd.socket
+systemctl restart cluster-agent.service
 
 log "done. Check: systemctl status cluster-agent; ss -ltnp shows no agent listener"
 log "then confirm labels and capacity for $NODE_ID in the web UI (security.md 8.3)"

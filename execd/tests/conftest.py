@@ -94,19 +94,29 @@ def public_paths():
     shutil.rmtree(base, ignore_errors=True)
 
 
-def _world_executable(path):
-    path = os.path.realpath(path)
-    parts = [path] + [os.path.dirname(path)]
-    while parts[-1] not in ("/", ""):
-        parts.append(os.path.dirname(parts[-1]))
-    return all(os.stat(p).st_mode & 0o001 for p in parts)
+def _reachable_by_others(path):
+    """Every directory on the way must be traversable by other users (unresolved and real)."""
+    for candidate in {os.path.abspath(path), os.path.realpath(path)}:
+        parent = os.path.dirname(candidate)
+        while True:
+            if not os.stat(parent).st_mode & 0o001:
+                return False
+            if parent == "/":
+                break
+            parent = os.path.dirname(parent)
+        if not os.stat(candidate).st_mode & 0o004:
+            return False
+    return True
 
 
 @pytest.fixture
 def worker_python():
-    """The collect worker re-executes this interpreter as the run user."""
-    if not _world_executable(sys.executable):
-        pytest.skip(f"{sys.executable} is not reachable by other users (test venv layout)")
+    """The collect worker runs this interpreter and file as the unprivileged run user."""
+    import cluster_execd.collect_worker as worker
+
+    for path in (sys.executable, worker.__file__):
+        if not _reachable_by_others(path):
+            pytest.skip(f"{path} is not reachable by other users (checkout/venv permissions)")
 
 
 @pytest.fixture
@@ -142,8 +152,11 @@ class Client:
         task = asyncio.ensure_future(read_all())
         if cancel_after is not None:
             await asyncio.sleep(cancel_after)
-            writer.write(b'{"op":"cancel"}\n')
-            await writer.drain()
+            try:  # the run may already be over and the server gone
+                writer.write(b'{"op":"cancel"}\n')
+                await writer.drain()
+            except ConnectionError:
+                pass
         if close_after is not None:
             await asyncio.sleep(close_after)
             writer.close()

@@ -1,7 +1,8 @@
 """The agent's session logic: hello/welcome, metrics, exec/cancel, lockdown, reconnects.
 
 Messages follow docs/PLAN.md 12.1. Commands keep running across reconnects (the master link
-and the execd link are independent); their results are queued and sent after the next hello.
+and the execd link are independent); their results are queued and sent after the next hello,
+which lists them in `pending_results` so the master does not declare those runs lost.
 """
 
 from __future__ import annotations
@@ -10,15 +11,20 @@ import asyncio
 import collections
 import json
 import logging
+import re
 import time
-from typing import Any, Callable, Deque, Dict, Optional
+from typing import Any, Callable, Deque, Dict, List, Optional
+
+from websockets.exceptions import ConnectionClosed
 
 from . import __version__
 from .collectors import MetricsCollector
+from .config import CommandLimits
 from .connection import (
     CLOSE_AUTH,
     CLOSE_DUPLICATE,
     CLOSE_IDENTITY,
+    CLOSE_RATE,
     Backoff,
     close_code,
     connect,
@@ -31,9 +37,13 @@ log = logging.getLogger(__name__)
 WELCOME_TIMEOUT = 10.0
 AUTH_RETRY_S = 300.0  # a revoked token will not fix itself; do not hammer the master
 DUPLICATE_RETRY_S = 60.0
+RATE_RETRY_S = 60.0
+STABLE_SESSION_S = 30.0  # only a session that lasted this long resets the reconnect backoff
 MAX_PENDING_RESULTS = 200
-OUTPUT_BYTES_PER_S = 256 * 1024  # stays well under the master's 1 MiB/s per connection
-OUTPUT_MSGS_PER_S = 30  # master allows 50 messages/s in total
+OUTPUT_BYTES_PER_S = 256 * 1024  # serialized bytes; well under the master's 1 MiB/s
+OUTPUT_MSGS_PER_S = 30  # master allows 50 messages/s per connection in total
+OUTPUT_PIECE_CHARS = 5000  # <= 30 KB once JSON-escaped (6 bytes/char worst case) < 64 KiB cap
+RUN_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")  # same rule as cluster-execd
 EXTRA_KEYS = ("bpu", "throttled", "core_volts", "reboot_required", "isolation_mode")
 
 
@@ -55,6 +65,17 @@ class TokenBucket:
         return True
 
 
+def encode(msg: Dict[str, Any]) -> str:
+    """Compact JSON; falls back to ASCII escapes for strings that are not valid UTF-8
+    (a lone surrogate would otherwise fail inside websockets and wedge the result queue)."""
+    data = json.dumps(msg, separators=(",", ":"), ensure_ascii=False)
+    try:
+        data.encode("utf-8")
+    except UnicodeEncodeError:
+        data = json.dumps(msg, separators=(",", ":"), ensure_ascii=True)
+    return data
+
+
 class Agent:
     def __init__(
         self,
@@ -66,6 +87,7 @@ class Agent:
         static_extra: Optional[Dict[str, Any]] = None,
         ssl_ctx: Any = None,
         metrics_interval: float = 5.0,
+        command_limits: Optional[CommandLimits] = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.node_id = node_id
@@ -76,6 +98,7 @@ class Agent:
         self.static_extra = static_extra or {}
         self.ssl_ctx = ssl_ctx
         self.metrics_interval = metrics_interval
+        self.limits = command_limits or CommandLimits()
         self.lockdown = False
         self.connected = asyncio.Event()
         self.pending_results: Deque[Dict[str, Any]] = collections.deque(maxlen=MAX_PENDING_RESULTS)
@@ -84,6 +107,7 @@ class Agent:
         self._flush_lock = asyncio.Lock()
         self._runs: Dict[str, asyncio.Task] = {}
         self._dropped: Dict[str, int] = {}
+        self._clock = clock
         self._out_bytes = TokenBucket(OUTPUT_BYTES_PER_S, 2 * OUTPUT_BYTES_PER_S, clock)
         self._out_msgs = TokenBucket(OUTPUT_MSGS_PER_S, 2 * OUTPUT_MSGS_PER_S, clock)
         self._stopping = asyncio.Event()
@@ -94,11 +118,13 @@ class Agent:
         backoff = Backoff()
         while not self._stopping.is_set():
             delay = backoff.next()
+            started: Optional[float] = None
             try:
                 async with connect(self.master_url, self.token, self.node_id, self.ssl_ctx) as ws:
-                    backoff.reset()
+                    if self._stopping.is_set():  # stop() arrived during the handshake
+                        break
+                    started = self._clock()
                     await self._session(ws)
-                    delay = backoff.next()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 - every failure means "reconnect later"
@@ -106,6 +132,8 @@ class Agent:
             finally:
                 self._ws = None
                 self.connected.clear()
+            if started is not None and self._clock() - started >= STABLE_SESSION_S:
+                backoff.reset()  # a master that drops us right away keeps escalating
             if self._stopping.is_set():
                 break
             try:
@@ -130,6 +158,9 @@ class Agent:
                 self.node_id,
             )
             return DUPLICATE_RETRY_S
+        if code == CLOSE_RATE:
+            log.error("master closed the connection for exceeding its rate limit")
+            return RATE_RETRY_S
         log.warning(
             "connection to master failed: %s: %s (retry in %.0fs)", type(exc).__name__, exc, default
         )
@@ -155,7 +186,9 @@ class Agent:
             "running_tasks": [],
             "unacked_results": [],
             "orphaned": [],
-            "running_commands": self.executor.running(),
+            "running_commands": sorted(set(self.executor.running()) | set(self._runs)),
+            # results that finished while disconnected; they follow right after welcome
+            "pending_results": [m["run_id"] for m in self.pending_results],
         }
 
     async def _session(self, ws: Any) -> None:
@@ -184,7 +217,11 @@ class Agent:
 
     async def _receive_loop(self, ws: Any) -> None:
         while True:
-            await self._dispatch(await self._recv(ws))
+            msg = await self._recv(ws)
+            try:
+                await self._dispatch(msg)
+            except Exception:  # noqa: BLE001 - one bad message must not drop the session
+                log.exception("error handling %r message", msg.get("type"))
 
     async def _recv(self, ws: Any) -> Dict[str, Any]:
         raw = await ws.recv()
@@ -206,15 +243,18 @@ class Agent:
     def _apply_config(self, msg: Dict[str, Any]) -> None:
         interval = msg.get("metrics_interval")
         if isinstance(interval, (int, float)) and not isinstance(interval, bool):
-            self.metrics_interval = min(60.0, max(1.0, float(interval)))
+            if interval == interval:  # not NaN
+                self.metrics_interval = min(60.0, max(1.0, float(interval)))
 
-    async def _send(self, msg: Dict[str, Any]) -> None:
+    async def _send(self, msg: Dict[str, Any]) -> int:
+        """Send one message and return its serialized size."""
         ws = self._ws
         if ws is None:
             raise ConnectionError("not connected")
-        data = json.dumps(msg, separators=(",", ":"), ensure_ascii=False)
+        data = encode(msg)
         async with self._send_lock:
             await ws.send(data)
+        return len(data.encode("utf-8"))
 
     # -- messages from the master ---------------------------------------------------------
 
@@ -240,26 +280,38 @@ class Agent:
         if not self.lockdown:
             log.warning("lockdown: refusing all exec requests until the master unlocks")
         self.lockdown = True
+        # cancel_all also covers runs that are still starting (security.md 16)
         asyncio.ensure_future(self.executor.cancel_all())
 
     def _start_run(self, msg: Dict[str, Any]) -> None:
         run_id = msg.get("run_id")
-        if not isinstance(run_id, str) or not run_id:
-            log.warning("exec without run_id ignored")
+        if not isinstance(run_id, str) or not RUN_ID.fullmatch(run_id):
+            # Not echoed back: an id we cannot validate cannot be put into a result either.
+            log.warning("exec with an invalid run_id ignored")
+            return
+        if run_id in self._runs or run_id in self.executor.running():
+            log.warning("duplicate exec for running %s ignored", run_id)
             return
         if self.lockdown:
             self._queue_result(ExecResult(run_id, "rejected", reason="lockdown").to_message())
             return
         try:
-            req = ExecRequest.from_message(msg)
-        except (ValueError, TypeError) as exc:
+            req = ExecRequest.from_message(msg, default_timeout=self.limits.default_timeout)
+        except (ValueError, TypeError, OverflowError) as exc:
             self._queue_result(ExecResult(run_id, "rejected", reason=str(exc)).to_message())
+            return
+        if req.timeout > self.limits.max_timeout:
+            reason = f"timeout exceeds this node's limit of {self.limits.max_timeout:.0f}s"
+            self._queue_result(ExecResult(run_id, "rejected", reason=reason).to_message())
             return
         task = asyncio.ensure_future(self._run(req))
         self._runs[run_id] = task
         task.add_done_callback(lambda _t, r=run_id: self._runs.pop(r, None))
 
     async def _run(self, req: ExecRequest) -> None:
+        if self.lockdown:  # lockdown arrived between scheduling and starting
+            self._queue_result(ExecResult(req.run_id, "rejected", reason="lockdown").to_message())
+            return
         self._dropped[req.run_id] = 0
 
         async def sink(stream: str, text: str) -> None:
@@ -274,19 +326,20 @@ class Agent:
         self._queue_result(result.to_message())
 
     async def _send_output(self, run_id: str, stream: str, text: str) -> None:
-        size = len(text.encode("utf-8"))
-        # Output is the only droppable traffic: metrics double as heartbeat and must get through.
-        if not self.connected.is_set() or not (
-            self._out_msgs.take(1) and self._out_bytes.take(size)
-        ):
-            self._dropped[run_id] = self._dropped.get(run_id, 0) + size
-            return
-        try:
-            await self._send(
-                {"type": "cmd_output", "run_id": run_id, "stream": stream, "data": text}
-            )
-        except Exception:  # noqa: BLE001 - connection lost: the result is queued later
-            self._dropped[run_id] = self._dropped.get(run_id, 0) + size
+        for piece in _pieces(text):
+            msg = {"type": "cmd_output", "run_id": run_id, "stream": stream, "data": piece}
+            size = len(encode(msg).encode("utf-8"))
+            # Output is the only droppable traffic: metrics double as heartbeat and must get
+            # through. The budget is charged with the bytes that actually go on the wire.
+            if not self.connected.is_set() or not (
+                self._out_msgs.take(1) and self._out_bytes.take(size)
+            ):
+                self._dropped[run_id] = self._dropped.get(run_id, 0) + len(piece.encode("utf-8"))
+                continue
+            try:
+                await self._send(msg)
+            except Exception:  # noqa: BLE001 - connection lost: the result is queued later
+                self._dropped[run_id] = self._dropped.get(run_id, 0) + len(piece.encode("utf-8"))
 
     def _queue_result(self, msg: Dict[str, Any]) -> None:
         self.pending_results.append(msg)
@@ -298,8 +351,10 @@ class Agent:
             while self.pending_results and self.connected.is_set():
                 try:
                     await self._send(self.pending_results[0])
-                except Exception:  # noqa: BLE001 - stays queued for the next session
-                    return
+                except (ConnectionError, OSError, ConnectionClosed):
+                    return  # stays queued for the next session
+                except Exception as exc:  # noqa: BLE001 - never let one item wedge the queue
+                    log.error("dropping unsendable result %r: %s", self.pending_results[0], exc)
                 self.pending_results.popleft()
 
     # -- metrics --------------------------------------------------------------------------
@@ -330,3 +385,7 @@ class Agent:
             sample = await loop.run_in_executor(None, self.collector.collect)
             await self._send(self.metrics_message(sample))
             await asyncio.sleep(self.metrics_interval)
+
+
+def _pieces(text: str) -> List[str]:
+    return [text[i : i + OUTPUT_PIECE_CHARS] for i in range(0, len(text), OUTPUT_PIECE_CHARS)]
