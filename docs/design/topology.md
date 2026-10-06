@@ -186,12 +186,13 @@ v2 선택지: 공유기(dnsmasq 지원 시)나 rdkx3-01의 로컬 DNS로 이전.
 ```bash
 # cluster-vip.service 가 하는 일 (현재 master에서만 enable)
 # VIP 주소 자체는 네트워크 설정 도구(C21 결과)의 보조 주소로 영속화하고, 서비스는 붙이기·떼기와 ARP 갱신만 한다
+# 주의: 프로필에 영속화한 VIP는 서비스 enable/mask와 무관하게 부팅·링크업마다 붙는다 (아래 failover 항목)
 nmcli con mod "<eth0 연결>" +ipv4.addresses 192.168.1.200/24 && nmcli con up "<eth0 연결>"   # NetworkManager인 경우
 #   netplan인 경우: addresses 목록에 192.168.1.200/24 추가 후 netplan apply
 arping -U -c 3 -I eth0 192.168.1.200   # 다른 노드의 ARP 캐시 갱신 (iputils-arping)
 ```
 
-- `ip addr add`로 붙인 수동 주소는 NetworkManager/netplan이 인터페이스를 다시 적용하거나 DHCP를 갱신할 때 사라질 수 있다. 그래서 위처럼 **연결 프로필의 보조 주소**로 둔다(어느 도구인지는 Phase 0 C21). failover 시에는 rdkx3-01에서 제거(전원 차단이 기본)하고 rdkx3-02 프로필에 추가한다.
+- `ip addr add`로 붙인 수동 주소는 NetworkManager/netplan이 인터페이스를 다시 적용하거나 DHCP를 갱신할 때 사라질 수 있다. 그래서 위처럼 **연결 프로필의 보조 주소**로 둔다(어느 도구인지는 Phase 0 C21). failover 시에는 rdkx3-01에서 제거(전원 차단이 기본)하고 rdkx3-02 프로필에 추가한다. 따라서 VIP 소유의 실제 통제 수단은 cluster-vip.service의 enable/mask가 아니라 **연결 프로필**이다. 전원만 차단한 rdkx3-01의 프로필에는 VIP가 남아 있으므로, 다시 켜면 rdkx3-02와 같은 192.168.1.200을 동시에 갖는 IP 충돌(split-brain)이 생긴다. 그래서 rdkx3-01은 **랜선을 뽑은 상태에서 부팅해 프로필의 VIP를 제거한 뒤에만**(NetworkManager: `nmcli con mod "<eth0 연결>" -ipv4.addresses 192.168.1.200/24`, netplan: addresses에서 삭제) LAN에 다시 붙인다(7.3).
 - 부팅 순서: `caddy.service`와 chrony 서버 설정 유닛에 `Requires=cluster-vip.service`, `After=cluster-vip.service`. VIP가 없으면 Caddy가 `bind: cannot assign requested address`로 실패해 5대가 모두 offline이 되기 때문이다.
 - 대안: Caddy를 `0.0.0.0:443`에 바인드하고 nft의 `ip daddr $VIP tcp dport 443` 규칙으로 VIP 외 접근을 막는다(VIP 소실 시에도 Caddy는 살아 있음). 기본은 위 방식, C21 결과가 불안정하면 대안으로 바꾼다.
 
@@ -255,8 +256,9 @@ master(1Gbps)는 Pi 3대에 동시에 보내도(3 × 100Mbps) 링크가 남으�
 # /etc/systemd/journald.conf.d/cluster.conf
 [Journal]
 Storage=persistent
-SystemMaxUse=100M      # Pi 3B는 50M
-SystemKeepFree=500M    # Pi 3B는 300M
+# Pi 3B는 50M / 300M
+SystemMaxUse=100M
+SystemKeepFree=500M
 RuntimeMaxUse=30M
 ```
 
@@ -408,7 +410,7 @@ sequenceDiagram
 
 ### 7.3 수동 failover 절차 개요
 
-1. **rdkx3-01이 확실히 멈췄는지 확인**하고, 살아 있다면 전원을 뽑거나 랜선을 분리한다(split-brain 방지의 핵심).
+1. **rdkx3-01이 확실히 멈췄는지 확인**하고, 살아 있다면 전원을 뽑거나 랜선을 분리한다(split-brain 방지의 핵심). rdkx3-01의 연결 프로필에는 VIP가 남아 있으므로, 나중에 다시 LAN에 붙이기 전에 **반드시 랜선을 뽑은 상태로 부팅해 프로필의 VIP를 제거**한다(3.3).
 2. rdkx3-02에 관리 PC에서 SSH 접속, 최신 번들(rdkx3-02 사본이 손상됐으면 관리 PC 사본)을 복호화 키로 풀어 `/var/lib/cluster-master`와 `/etc/cluster-master`에 복원한다.
 3. 복원된 DB에서 **진행 중이던 명령·잡 실행은 유실(lost) 처리, 대기 중이던 승인(approvals)은 만료 처리**한다. 백업 시점 이후 상태를 신뢰할 수 없기 때문이다(잡 재배치 규칙은 [jobs.md](./jobs.md) 7.6, 승인 처리 규칙은 [security.md](./security.md) 7.5-3). 표시 번호(`J-n`, `T-n`, 명령 `#n`)는 `max+1000`부터 다시 시작한다(jobs.md 17장).
 4. master 계열 서비스를 unmask → `cluster-vip` → cluster-master → cluster-telegram → cluster-ai → Caddy 순으로 시작한다.
@@ -450,7 +452,7 @@ notifier·outbox·cluster-telegram이 모두 rdkx3-01에 있으므로 **rdkx3-01
 | C4 | systemd | `systemd --version \| head -1` | 버전 기록 |
 | C5 | cgroup 버전 | `stat -fc %T /sys/fs/cgroup` | `cgroup2fs` = v2, `tmpfs` = v1/hybrid |
 | C6 | 활성 컨트롤러 | `cat /sys/fs/cgroup/cgroup.controllers` | `memory`, `cpu` 포함 여부 |
-| C7 | 시스템 서비스 수준 제한 동작 | `sudo systemd-run --wait --collect -p MemoryMax=64M -p CPUQuota=50% sh -c 'cat /proc/self/cgroup; cat /sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)/memory.max'` | `67108864` 출력되면 memory 제한 가능. systemd-run 자체가 동작하면 격리 모드 A(execd 경로, security.md 11.2) |
+| C7 | 시스템 서비스 수준 제한 동작 | `sudo systemd-run --pipe --wait --collect -p MemoryMax=64M -p CPUQuota=50% sh -c 'cat /proc/self/cgroup; cat /sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)/memory.max'` | `67108864` 출력되면 memory 제한 가능. systemd-run 자체가 동작하면 격리 모드 A(execd 경로, security.md 11.2) |
 | C8 | needrestart | `dpkg -l needrestart; grep -rh 'nrconf{restart}' /etc/needrestart/ 2>/dev/null` | 설치 여부·모드 기록. `apt.*` root_op은 `NEEDRESTART_MODE=l`로 자동 재시작을 막는다([security.md](./security.md) 9.4) |
 | C9 | setuid/setgid 바이너리 | `find / -xdev -perm /6000 -type f 2>/dev/null` | 목록 기록, 불필요한 것 제거 검토. 격리 모드 B 노드는 필수([security.md](./security.md) 11.2) |
 | C10 | 메모리 | `free -m; grep -E 'MemTotal\|CmaTotal' /proc/meminfo` | 6장 공식 입력값 |

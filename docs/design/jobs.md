@@ -447,7 +447,7 @@ flowchart TB
 | `install_bundle` | root (execd) | agent가 `/var/lib/cluster-agent/incoming/<sha256>`에 받은 파일을 execd가 sha256 재검증·tar 검사 후 `/var/lib/cluster-run/cache/{bundles,data}/<sha256>/`에 root 소유 읽기 전용으로 푼다 |
 | `job` | 유닛은 `cluster-run` | 작업 디렉터리 `/var/lib/cluster-run/work/<attempt_id>` 생성(cluster-run 0700) → 9.2 속성으로 `systemd-run` → stdout/stderr를 소켓으로 agent에 중계 |
 | `stop` | root (execd) | `systemctl stop cluster-run-<attempt_id>.service` (SIGTERM → `TimeoutStopSec` 후 SIGKILL, 그룹 전체) |
-| `collect` | `cluster-run`으로 권한을 내린 execd 자식 | `outputs.paths`에 맞는 일반 파일만 `openat(O_NOFOLLOW)`로 읽어 바이트 스트림으로 넘기고, execd가 `/var/lib/cluster-agent/outbox/<attempt_id>/`에 `cluster-agent` 소유로 쓴다(10.4절) |
+| `collect` | `cluster-run`으로 권한을 내린 execd 자식 | `outputs.paths`에 맞는 일반 파일만 `openat(O_NOFOLLOW)`로 읽어 바이트 스트림으로 넘기고, agent가 받아 `/var/lib/cluster-agent/outbox/<attempt_id>/`에 직접 쓴다(root는 agent 디렉터리에 쓰지 않음, security.md 9.3, 10.4절) |
 | `cleanup` | root (execd) | 작업 디렉터리 삭제 |
 
 - 유닛 이름은 **`cluster-run-<attempt_id>.service`**(security.md 11.1과 하나로 통일, `run_id = attempt_id`). execd는 `run_id`를 `^[A-Za-z0-9_-]{1,64}$`로 검증한다.
@@ -512,7 +512,7 @@ systemd-run --unit=cluster-run-01JA8Z... --slice=cluster-jobs.slice \
 
 /var/lib/cluster-agent/                   # agent 영역 (비밀 쪽, 잡 유닛에서 InaccessiblePaths)
   incoming/<sha256>         # 다운로드 중·검증 전 번들 파일 (install_bundle 입력)
-  outbox/<attempt_id>/      # execd collect 결과 (cluster-agent 소유). agent가 읽어 업로드
+  outbox/<attempt_id>/      # execd collect 스트림을 agent가 저장 (cluster-agent 소유). agent가 읽어 업로드
   results/<attempt_id>.json # 미전달 결과 (7.5절)
 ```
 
@@ -679,7 +679,7 @@ PLAN.md 12장의 JSON + `type` 규칙을 따른다. 모든 Task 메시지는 `at
 
 | type | 추가 필드 | 설명 |
 |---|---|---|
-| `hello` | `static_info.isolation` (`systemd`\|`fallback`), `static_info.datasets`(경고용, 권위값 아님), `running_tasks: [{task_id, attempt_id, started_at}]`, `unacked_results: [task_result...]`, `orphaned: [attempt_id]` | 재접속·재시작 후 상태 재조정 (7.6절) |
+| `hello` | `static_info.isolation` (`systemd`\|`fallback`), `static_info.datasets`(경고용, 권위값 아님), `running_tasks: [{task_id, attempt_id, started_at}]`, `unacked_results: [task_result | cmd_result ...]`(`cmd_result`는 `survive_disconnect` root_op 명령 결과, security.md 9.4), `orphaned: [attempt_id]` | 재접속·재시작 후 상태 재조정 (7.6절) |
 | `metrics` | `sched: {free_slots, free_bpu_slots, job_mem_free_mb, running: [attempt_id], cached_bundles: [sha256 앞 12자]}` (배열 ≤ 64, security.md 8.3) | 자원 광고 + lease 갱신 |
 | `welcome` | `lease_ttl_s`, `work_request_interval_s` | |
 

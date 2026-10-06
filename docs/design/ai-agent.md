@@ -84,7 +84,7 @@ flowchart LR
 |---|---|
 | 서비스 | `cluster-ai.service`. 계정은 `cluster-ai`(nologin), 그룹은 `cluster-svc`(UDS 접근용) |
 | 하드닝 | security.md 9.6절 계열 옵션에 `ProtectProc=invisible`, `ProcSubset=pid`를 더한다. 쓰기 경로는 `StateDirectory=cluster-ai` 하나뿐이다. 자식 프로세스를 띄울 일이 없으므로 `SystemCallFilter=@system-service` + `~@privileged`, 그리고 `NoNewPrivileges=yes` |
-| 네트워크 | 리스닝 포트 없음. 아웃바운드는 Anthropic API 443과 master UDS뿐이다(nft 규칙은 security.md 4.3절) |
+| 네트워크 | 리스닝 포트 없음. 아웃바운드는 Anthropic API 443과 master UDS만 쓴다. nft(security.md 4.3절)는 내부 리스너(127.0.0.1:8000/8001) 접근만 막고, 목적지 제한(`IPAddressDeny` 등)은 v2로 미룬다(telegram.md 3.5와 같음) |
 | 시크릿 | `LoadCredential=anthropic_api_key`, `service_token` (security.md 12.1절). **환경변수를 쓰지 않는다.** `AsyncAnthropic(api_key=<credential 파일 내용>)`처럼 명시적으로 넘긴다(SDK의 환경변수 자동 탐색을 쓰지 않음) |
 | DB | 없다. master DB에 직접 접근하지 않고 모든 상태를 `/internal/*` API로 읽고 쓴다. `StateDirectory`에는 재시작 복구용 커서만 둔다 |
 | 메모리 | RSS ≤150MB, `MemoryMax=300M` ([topology.md](./topology.md) 6.2절) |
@@ -148,10 +148,10 @@ internal 리스너는 `/internal/*`만 받는다(security.md 4.1절). 읽기·�
 | `tool_choice` | `auto` (기본값이라 보내지 않음) | Opus 5.5에서 `any`/`tool` 강제는 400을 낸다. 특정 툴을 쓰게 하려면 프롬프트로 유도한다 |
 | assistant prefill | 쓰지 않는다 | Opus 5.5는 지원하지 않는다. 보고 형식은 시스템 프롬프트로 정한다 |
 | `betas` | `["server-side-fallback-2026-07-01", "task-budgets-2026-03-13"]` | |
-| `fallbacks` | `"default"` | 안전 분류기가 거부하면 서버가 대체 모델로 자동 재시도한다. 대체 모델이 처리한 응답은 응답의 `model` 값으로 단가를 찾는다(9.3절) |
+| `fallbacks` | `"default"` | 안전 분류기가 거부하면 서버가 대체 모델로 자동 재시도한다. 대체 대상은 `claude-opus-5-5`의 `allowed_fallback_models`로 정해지며(Claude Opus 5·`claude-opus-4-8` 예상), 두 모델 모두 단가표에 둔다. 비용은 시도별로 그 시도를 수행한 모델의 단가로 계산한다(9.3절) |
 | `output_config.task_budget` | `{"type": "tokens", "total": N}` (N ≥ 20000) | 권고형. 모델이 스스로 속도를 조절한다. 강제 상한은 하네스가 맡는다(9.2절) |
 | `cache_control` | 최상위 `{"type": "ephemeral"}` | 자동 캐싱 (9.4절) |
-| `strict` | 모든 툴 정의에 `true` | 스키마 위반 입력이 아예 생성되지 않게 한다. 그래도 master가 다시 검증한다 |
+| `strict` | `submit_job`을 뺀 모든 툴 정의에 `true` (4.1-5) | 타입·enum·required·additionalProperties 수준만 보장된다. 길이·범위·개수 제약은 strict 스키마에 넣을 수 없으므로(넣으면 400) 툴 함수와 master가 검증한다 |
 
 ### 3.2 stop_reason 처리 (툴 실행 전에 검사)
 
@@ -159,7 +159,7 @@ runner는 반복마다 assistant 메시지를 툴 실행 **전에** 넘겨준다
 
 | stop_reason | 처리 |
 |---|---|
-| `refusal` | 서버 대체(fallbacks)까지 거친 뒤에도 거부된 것이다. 태스크를 `failed`(reason=`refusal`)로 끝내고, 사용자에게 "요청을 처리할 수 없음"과 지금까지 한 일을 보고한다. 같은 지시로 자동 재시도하지 않는다 |
+| `refusal` | 서버 대체가 적용되지 않았거나(`stop_details.category`가 `reasoning_extraction`, 대체 모델 rate limit·과부하) 대체 모델도 거부한 것이다. `stop_details.category`와 `recommended_model`을 transcript에 기록한다. 태스크를 `failed`(reason=`refusal`)로 끝내고, 사용자에게 "요청을 처리할 수 없음"과 지금까지 한 일을 보고한다. 같은 지시로 자동 재시도하지 않는다 |
 | `max_tokens` | 잘린 응답이고 불완전한 `tool_use`가 섞여 있을 수 있다. **히스토리에 넣지 않고 버린 뒤 같은 요청을 1회만 재시도**한다. 다시 잘리면 `failed`(reason=`max_tokens`) |
 | `tool_use` | 하네스 가드(9.2절)를 통과하면 진행 |
 | `end_turn` | 마지막 텍스트를 최종 보고로 저장 → `reporting` → `done` |
@@ -209,11 +209,14 @@ async def run_task(task: AiTask, history: list) -> None:
                 break                                    # 같은 히스토리로 runner를 다시 만든다
             history.append(tool_response)
         if not restart:
+            if message.stop_reason == "tool_use":       # max_iterations 도달: runner가 표시 없이 끝남
+                return await wrap_up(task, history, status="budget_exceeded")  # 9.2 마무리 보고
             return await finish(task, history)
 ```
 
 - **히스토리는 하네스가 직접 들고 있는다.** runner는 내부 히스토리를 노출하지 않는다. transcript 저장, 후속 지시 삽입, 재시작 모두 이 사본으로 한다. 히스토리는 **뒤에 덧붙이기만** 하고 앞부분은 고치지 않는다. 그래야 캐시 prefix가 유지된다.
 - **후속 지시 삽입 지점**: 툴 결과 user 메시지의 `tool_result` 블록 뒤에 텍스트 블록(`<user_followup>`)을 붙인다. 하네스 공지(예산 80% 경고 등)는 그 뒤에 `role: "system"` 메시지로 붙인다. Opus 5.5는 대화 중간 system 메시지를 지원하고, 이 방식은 캐시를 깨지 않는다.
+- **`max_iterations` 도달은 runner가 알려 주지 않는다.** SDK의 tool runner는 반복 수가 `max_iterations`에 닿으면 예외 없이 `async for`를 끝낸다. 마지막 반복의 툴은 이미 실행됐지만 그 결과는 모델에 전달되지 않는다. 그래서 루프가 끝난 뒤 마지막 메시지의 `stop_reason`이 `tool_use`이면 `budget_exceeded`로 전이하고 9.2절의 마무리 보고 호출을 한다(위 스케치).
 - 툴 함수 안의 예외는 전부 잡아서 `{"ok": false, "error": "..."}` 결과로 돌려준다. 예외가 runner 밖으로 새어 나가지 않게 한다.
 - 모델이 한 턴에 툴을 여러 개 호출하면 읽기 툴은 동시에 실행해도 된다. **변경 툴은 태스크 단위 `asyncio.Lock`으로 직렬화**한다(대기 중 승인 ≤ 1, 9.2절).
 
@@ -236,7 +239,7 @@ async def run_task(task: AiTask, history: list) -> None:
 2. **툴 목록은 고정이다.** 사용자 역할에 따라 목록을 바꾸지 않는다. 바꾸면 캐시가 갈라지고, 실제 권한 판정은 어차피 master가 한다. 그 대신 첫 user 메시지에 "요청자 역할"을 적어 모델이 쓸모없는 호출을 하지 않게 한다. 정책상 꺼진 툴(`ai_policy.tools`에 없음)도 목록에는 남기되 호출하면 `disabled_by_policy`를 돌려준다. 단 **금지 범주(4.3절)는 아예 툴로 만들지 않는다.**
 3. **결과는 두 부분으로 나눈다.** 하나는 master가 만든 구조화 필드(숫자, enum, id, 상태)이고, 다른 하나는 신뢰할 수 없는 문자열 블록(명령 출력, 로그, 노드가 보낸 문자열)이다(7.2절).
 4. **노드 지정**: `targets`는 `["rpi3-01", "board:rpi3", "all"]` 같은 문자열 배열이다. master가 요청 시점에 **구체적인 node_id 목록으로 풀고** 그 목록을 승인 payload에 넣는다(security.md 7.5-1). 호스트명은 늘어날 수 있으므로 enum이 아니라 패턴으로 검증한다: `^([a-z0-9][a-z0-9-]{0,31}|board:[a-z0-9]+|all)$`.
-5. strict 모드라서 모든 필드는 `required`이고, 생략할 수 있는 값은 `null`을 허용하는 타입으로 둔다. `additionalProperties: false`.
+5. strict 툴은 선택 필드를 지원하므로 생략할 수 있는 값은 `required`에서 뺀다. 객체는 모두 `additionalProperties: false`다(strict는 `false` 외의 값을 받지 않으므로 map 필드는 표현할 수 없다). 요청 하나에 strict 툴 20개, `required`가 아닌 선택 파라미터 합계 24개, union 타입(`anyOf`이나 `["string","null"]` 같은 타입 배열) 파라미터 합계 16개(모든 strict 스키마 합산)라는 상한이 있으므로 이 안에서 설계한다(넘으면 400). strict 스키마는 `minimum`/`maximum`/`multipleOf`, `minLength`/`maxLength`, `minItems` 0·1을 넘는 배열 제약(`maxItems` 포함)을 지원하지 않는다(보내면 400). SDK의 `@beta_async_tool(input_schema=dict, strict=True)`도 스키마를 그대로 보내므로, 이런 제약은 스키마에서 빼고 description으로 옮기고(`anthropic.transform_schema()` 또는 직접), 4.2절 표의 길이·범위·개수 상한은 툴 함수와 master에서만 검증한다. 스키마를 이 안에 표현할 수 없는 `submit_job`(4.4절)은 strict를 끄고 master 검증에 맡긴다.
 
 ### 4.2 툴 목록과 분류
 
@@ -314,21 +317,23 @@ master는 이 조건을 어기는 `auto_presets` 설정 변경을 거부한다(�
     "additionalProperties": false,
     "required": ["targets", "command", "timeout_s", "reason"],
     "properties": {
-      "targets":   { "type": "array", "minItems": 1, "maxItems": 8,
+      "targets":   { "type": "array", "minItems": 1,
+                     "description": "At most 8 entries.",
                      "items": { "type": "string", "pattern": "^([a-z0-9][a-z0-9-]{0,31}|board:[a-z0-9]+|all)$" } },
-      "command":   { "type": "string", "minLength": 1, "maxLength": 4096,
-                     "description": "Printable characters only. Control, bidi and zero-width characters are rejected by the server." },
-      "timeout_s": { "type": "integer", "minimum": 1, "maximum": 600 },
-      "reason":    { "type": "string", "maxLength": 300,
-                     "description": "Why this command is needed; shown to the approver." }
+      "command":   { "type": "string",
+                     "description": "1 to 4096 characters. Printable characters only. Control, bidi and zero-width characters are rejected by the server." },
+      "timeout_s": { "type": "integer", "description": "Seconds, 1 to 600." },
+      "reason":    { "type": "string",
+                     "description": "Why this command is needed; shown to the approver. At most 300 characters." }
     }
   }
 }
 ```
 
+- strict 스키마에 넣을 수 없는 제약(`targets` 8개 이하, `command` 1~4096자, `timeout_s` 1~600, `reason` 300자 이하)은 description에만 적고, 툴 함수와 master가 검증해 어기면 `{"ok": false, "error": "..."}` / 400으로 돌려준다(4.1-5).
 - master는 AI 채널 요청의 실행 문자열 필드(`command`, 프리셋 파라미터, 잡 명세의 `command`·`args`·`env` 값, targets)에 C0/C1 제어문자(`\t` 제외)·bidi 제어문자·zero-width 문자가 있으면 400으로 거부한다(security.md 7.5-9). `reason`은 실행되지 않으므로 그런 문자를 제거하고 저장하며, 승인 화면에서 "요청자 설명 — 검증되지 않음" 라벨로 명령 아래에 표시된다.
 
-`submit_job.spec`은 jobs.md 4.2절의 필드 표를 그대로 JSON Schema로 옮기되, `as_root`와 `include_cordoned`는 뺀다. 그 밖에 master가 적용하는 강제값:
+`submit_job.spec`은 jobs.md 4.2절의 필드 표를 그대로 JSON Schema로 옮기되, `as_root`와 `include_cordoned`는 뺀다. 이 스키마는 선택 필드가 많고 `env`(map)·`items`(list|range|file union)를 포함해 strict 상한(4.1-5)을 넘으므로 `submit_job`은 `strict: false`로 두고, 명세 검증은 전부 master(`POST …/jobs/validate`)가 한다. 그 밖에 master가 적용하는 강제값:
 
 - `notify`: 기본 `never`(telegram.md 6.1의 enum). 결과는 `ai_task.finished` 보고에 들어간다(jobs.md 14.2절).
 - `network`: 기본 `none`. 바꾸려면 승인 화면에 강조 표시된다.
@@ -383,7 +388,7 @@ sequenceDiagram
 2. **AI는 승인할 수 없다.** 결정 API는 ai-operator 서비스 범위 밖이다(403). 툴 입력 어디에도 approval_id를 받지 않는다. `ask_user`의 답("응, 해")은 승인으로 취급하지 않는다.
 3. **결정 채널 규칙** (security.md 7.3절): 결정자는 그 작업을 그 채널에서 직접 할 권한이 있어야 한다.
    - `run_shell` 승인은 기본적으로 **웹에서만** 한다. 텔레그램 셸이 켜져 있을 때만 텔레그램 step-up을 거쳐 텔레그램에서도 승인할 수 있다.
-   - 텔레그램에서 결정하는 AI 승인은 대상이 medium 이상이면 **항상 텔레그램 step-up(TOTP)**이 붙는다(security.md 6장, T12). 결과적으로 AI v2의 변경 승인(변경 프리셋 high, 템플릿 잡 medium)은 텔레그램에서 전부 TOTP를 요구한다.
+   - 텔레그램에서 결정하는 AI 승인은 대상이 medium 이상이면 **항상 텔레그램 step-up(TOTP)**이 붙는다(security.md 6장, T12). 결과적으로 AI v2의 변경 승인(변경 프리셋·셸, high)과 AI v3의 템플릿 잡(medium)은 텔레그램에서 전부 TOTP를 요구한다.
    - 승인 메시지가 텔레그램 한 화면(3800자, 명령 20줄)을 넘으면 텔레그램 버튼 없이 웹에서만 승인한다(telegram.md 7.1).
    - 위험 패턴(security.md 10장 정규식)이 걸린 명령은 **웹 + 결정자 step-up(TOTP)**에서만 승인한다. 이것은 과속방지턱이지 보안 경계가 아니다. 경계는 `cluster-run` 계정, 노드 policy, 승인 그 자체다.
    - high 등급에는 일괄 승인 버튼을 두지 않는다.
@@ -571,13 +576,13 @@ sequenceDiagram
 | 항목 | medium | high | 도달 시 |
 |---|---|---|---|
 | `task_budget.total` (권고) | 60,000 | 120,000 | — (모델이 스스로 조절) |
-| runner 반복 (`max_iterations`) | 25 | 40 | `budget_exceeded` |
+| runner 반복 (`max_iterations`) | 25 | 40 | `budget_exceeded` (runner는 표시 없이 끝나므로 마지막 `stop_reason == "tool_use"`로 판별, 3.3절) |
 | 툴 호출 수 | 40 | 60 | 툴이 `limit_reached` 반환 → 다음 반복에서 종료 |
 | 벽시계 (승인·답변·잡 대기 포함) | 2시간 | 2시간 | 마무리 보고 후 `budget_exceeded` |
 | 태스크당 비용 | $1.00 | $2.00 | 다음 호출 **전에** 예측해서 막는다(아래) |
 | 일 / 월 비용 (전체) | $5 / $50 | 같음 | 신규 태스크 거부, 진행 중 태스크는 마무리 보고 후 종료 + 텔레그램 알림 |
 
-- **사전 예측 차단**: 호출 전에 `예상 비용 = 현재 컨텍스트 토큰 × 입력 단가(보수적으로 캐시 미적중 가정) + max_tokens × 출력 단가`를 계산한다. `누적 + 예상 > 상한`이면 호출하지 않는다. 상한을 넘겨서 끝나는 일이 없다.
+- **사전 예측 차단**: 호출 전에 `예상 비용 = 현재 컨텍스트 토큰 × 캐시 쓰기 단가(보수적으로 캐시 미적중 가정. 자동 캐싱에서는 미적중 prefix가 일반 입력이 아니라 캐시 쓰기로 과금된다) + max_tokens × 출력 단가`를 계산한다. `누적 + 예상 > 상한`이면 호출하지 않는다. 상한을 넘겨서 끝나는 일이 없다.
 - **80% 경고**: 비용·반복이 80%에 닿으면 대화 중간 system 메시지로 "예산 80% 사용, 지금까지 결과로 마무리 보고를 준비하라"를 넣는다(3.3절 재시작 지점).
 - **마무리 보고**: 상한에 걸리면 보고용 호출을 마지막으로 1회만 더 한다. 캐시를 유지하려고 `tools`는 그대로 두고, system 메시지로 "툴을 쓰지 말고 지금까지 결과로 보고만 하라"를 붙인다. 이 응답에 `tool_use`가 있어도 실행하지 않는다. 이 호출도 사전 예측 대상이다. 예산 여유가 없거나 보고가 오지 않으면 하네스가 transcript의 툴 호출·결과 목록으로 기계적인 보고를 만든다.
 - **장시간 잡**: `wait_for_job` 중에 벽시계 상한이 다가오면 "잡 진행 중"으로 중간 보고를 하고 태스크를 끝낸다. master는 **AI 태스크가 끝났는데 그 태스크가 제출한 잡이 아직 돌고 있으면 그 잡의 `notify`를 `never`에서 `default`로 바꾼다**(telegram.md 6.1의 enum). 사용자는 job.finished를 자기 prefs대로 따로 받는다(jobs.md 14.2).
@@ -585,7 +590,7 @@ sequenceDiagram
 
 ### 9.3 비용 계산
 
-호출마다 응답 `usage`로 계산하고, 응답의 `model`(fallback이면 대체 모델)로 단가표를 찾는다.
+호출마다 응답 `usage`로 계산하고, 응답의 `model`로 단가표를 찾는다. 서버 측 fallback이 일어나면 최상위 `usage`에는 반환된 메시지를 만든 시도 하나만 들어 있으므로, `usage.iterations`의 항목마다 그 시도를 수행한 모델의 단가로 계산해 합산하고 `ai_usage`에도 시도별로 기록한다(출력 도중 거부된 원래 모델의 시도는 원래 모델 단가, fallback 시도는 fallback 모델 단가).
 
 ```text
 cost_usd = ( input_tokens                × price.input
@@ -594,9 +599,9 @@ cost_usd = ( input_tokens                × price.input
            + output_tokens               × price.output ) / 1_000_000
 ```
 
-- 단가표는 config.yaml에 둔다(13장). 확정된 값은 `claude-opus-5-5` 입력 $4 / 출력 $20 / 캐시 읽기 $0.20이다.
-- 캐시 쓰기 단가와 보조 모델의 캐시 단가는 **Phase 0에서 공식 단가표로 확인한 뒤 기입**한다. 비어 있으면 보수적으로 `input × 2`로 계산하고 보고서에 "추정"이라고 표시한다.
-- 단가표에 없는 모델이 응답하면 그 태스크를 즉시 멈추고 알린다(비용을 모르는 상태로 계속하지 않음).
+- 단가표는 config.yaml에 둔다(13장). 확정된 값은 `claude-opus-5-5` 입력 $4 / 출력 $20 / 캐시 읽기 $0.20 / 캐시 쓰기 $5(5분 TTL, 1시간 TTL은 $8)이다. 캐시 쓰기는 5분 TTL이 입력의 1.25배, 1시간 TTL이 2배다.
+- 단가가 비어 있는 항목은 보수적으로 `input × 2`로 계산하고 보고서에 "추정"이라고 표시한다.
+- 단가표에 없는 모델이 응답하면 그 태스크를 즉시 멈추고 알린다(비용을 모르는 상태로 계속하지 않음). 그래서 fallback 대상도 단가표에 미리 넣는다. 시작할 때 `/v1/models`(server-side-fallback 베타 헤더 포함)에서 `claude-opus-5-5`의 `allowed_fallback_models`를 읽어, 단가표에 빠진 대상이 있으면 기동을 실패시킨다. sticky routing 때문에 한 번 fallback이 일어나면 약 1시간 동안 이후 요청도 fallback 모델이 처리할 수 있다.
 - adaptive thinking 토큰은 출력 토큰에 포함되어 과금된다. 그래서 effort가 비용에 직접 영향을 준다.
 
 ### 9.4 프롬프트 캐싱
@@ -610,28 +615,28 @@ cost_usd = ( input_tokens                × price.input
 | 가변 정보는 messages에 | 첫 user 메시지에 `<task_context>`(요청자 역할, 채널, 현재 시각 UTC, effort, 남은 예산)와 지시를 넣는다. **클러스터 상태는 넣지 않고 툴로만 얻게 한다** |
 | 덧붙이기만 | 히스토리 앞부분을 고치지 않는다. 운영자 공지는 대화 중간 system 메시지로 |
 | 자동 캐싱 | 최상위 `cache_control: {"type": "ephemeral"}` |
-| 검증 | 호출마다 `cache_read_input_tokens`와 직전 API 호출과의 간격 `gap_s`를 `ai_usage`에 기록한다. **`gap_s`가 캐시 수명(Phase 1에서 SDK·문서로 확인해 config에 기입) 이내인데 `cache_read = 0`일 때만** 경고 로그와 대시보드 "캐시 미적중" 표시를 한다(조용한 무효화 탐지). 승인·`ask_user`·`wait_for_job` 대기 뒤 첫 호출의 미적중은 정상으로 본다 |
+| 검증 | 호출마다 `cache_read_input_tokens`와 직전 API 호출과의 간격 `gap_s`를 `ai_usage`에 기록한다. **`gap_s`가 캐시 수명(Phase 0·구현 시 SDK·문서로 확인해 config에 기입) 이내인데 `cache_read = 0`일 때만** 경고 로그와 대시보드 "캐시 미적중" 표시를 한다(조용한 무효화 탐지). 승인·`ask_user`·`wait_for_job` 대기 뒤 첫 호출의 미적중은 정상으로 본다 |
 
 ### 9.5 작업당 비용 추정
 
-**가정** (Phase 1에서 실측으로 교체):
+**가정** (Phase 9(AI v1)에서 실측으로 교체):
 
 - 툴 + 시스템 프롬프트 6,000 토큰, 첫 지시 500 토큰.
 - 반복마다 히스토리가 1,500 토큰 늘어난다(툴 결과 ~1,000 + assistant ~500).
 - 출력은 반복당 medium 800 / high 2,000 토큰(thinking 포함).
-- 첫 호출은 캐시 미적중, 이후 직전 prefix는 전부 캐시 적중. 캐시 쓰기 할증은 무시한다(입력 단가로 계산).
-- 단가: 입력 $4, 출력 $20, 캐시 읽기 $0.20 / 1M.
+- 첫 호출은 캐시 미적중, 이후 직전 prefix는 전부 캐시 적중. 자동 캐싱에서는 "새 입력"이 대부분 캐시 쓰기(`cache_creation_input_tokens`)로 과금되므로 새 입력은 캐시 쓰기 단가(5분 TTL)로 계산한다.
+- 단가: 입력 $4, 출력 $20, 캐시 읽기 $0.20, 캐시 쓰기(5분) $5 / 1M.
 
-| 작업 유형 | 반복 | 새 입력 | 캐시 읽기 | 출력 | 추정 비용 |
+| 작업 유형 | 반복 | 새 입력 (캐시 쓰기) | 캐시 읽기 | 출력 | 추정 비용 |
 |---|---|---|---|---|---|
-| 단순 질의 ("클러스터 상태 요약해줘") | 2 | 8,000 → $0.032 | 6,500 → $0.001 | 1,600 → $0.032 | **≈ $0.07** |
-| 일반 작업, medium ("rpi3 디스크 정리") | 8 | 17,000 → $0.068 | 77,000 → $0.015 | 6,400 → $0.128 | **≈ $0.21** |
-| 복잡한 진단, high ("왜 rpi3-02가 느린지") | 20 | 35,000 → $0.140 | 380,000 → $0.076 | 40,000 → $0.800 | **≈ $1.02** |
-| 일반 작업 medium + 승인 1회 (승인 뒤 첫 호출은 캐시 수명이 지나 전체 미적중 가정) | 8 | 30,500 → $0.122 | 63,500 → $0.013 | 6,400 → $0.128 | **≈ $0.26** |
-| 참고: 위 medium 작업을 캐시 없이 | 8 | 94,000 → $0.376 | — | 6,400 → $0.128 | ≈ $0.50 |
+| 단순 질의 ("클러스터 상태 요약해줘") | 2 | 8,000 → $0.040 | 6,500 → $0.001 | 1,600 → $0.032 | **≈ $0.07** |
+| 일반 작업, medium ("rpi3 디스크 정리") | 8 | 17,000 → $0.085 | 77,000 → $0.015 | 6,400 → $0.128 | **≈ $0.23** |
+| 복잡한 진단, high ("왜 rpi3-02가 느린지") | 20 | 35,000 → $0.175 | 380,000 → $0.076 | 40,000 → $0.800 | **≈ $1.05** |
+| 일반 작업 medium + 승인 1회 (승인 뒤 첫 호출은 캐시 수명이 지나 전체 미적중 가정) | 8 | 30,500 → $0.153 | 63,500 → $0.013 | 6,400 → $0.128 | **≈ $0.29** |
+| 참고: 위 medium 작업을 캐시 없이 (입력 단가) | 8 | 94,000 → $0.376 | — | 6,400 → $0.128 | ≈ $0.50 |
 
 - 비용의 대부분은 **출력(thinking 포함)**이다. 그래서 기본 effort를 medium으로 두고, high는 사용자가 고를 때만 쓴다. 이 추정 때문에 high 태스크의 상한은 $2.00이다.
-- 하루 medium 작업 10건이면 ≈ $2.1/일, ≈ $63/월이다. 기본 월 상한 $50은 그보다 낮게 잡은 보수적 값이고, 실사용을 보고 admin이 조정한다.
+- 하루 medium 작업 10건이면 ≈ $2.3/일, ≈ $69/월이다. 기본 월 상한 $50은 그보다 낮게 잡은 보수적 값이고, 실사용을 보고 admin이 조정한다.
 
 ---
 
@@ -651,7 +656,7 @@ cost_usd = ( input_tokens                × price.input
  없음
 권장 조치
  - rpi3-01 /var/lib/cluster-run 이 9.1GB: 오래된 잡 작업 디렉터리 정리 정책 확인 필요
-비용 $0.19 · 호출 9회 · 입력 18k / 캐시 읽기 71k / 출력 6.2k 토큰 · 4분 12초
+비용 $0.23 · 호출 9회 · 입력 0.2k / 캐시 쓰기 18k / 캐시 읽기 71k / 출력 6.2k 토큰 · 4분 12초
 ```
 
 - 모델이 쓰는 부분은 **한 일 / 결과 / 실패 / 권장 조치**이고 형식은 시스템 프롬프트로 정한다. **비용과 소요 시간 줄은 하네스가 계산해서 붙인다**(모델이 지어내지 않게).
@@ -679,8 +684,8 @@ cost_usd = ( input_tokens                × price.input
     { "kind": "command", "id": 815, "preset_id": "maint.apt_clean", "approval_id": 45, "status": "ok" }
   ],
   "jobs_running": [],
-  "usage": { "input": 18210, "cache_read": 70944, "cache_write": 0, "output": 6188, "calls": 9 },
-  "cost_usd": 0.19,
+  "usage": { "input": 210, "cache_read": 70944, "cache_write": 18000, "output": 6188, "calls": 9 },
+  "cost_usd": 0.23,
   "cost_estimated": false,
   "duration_s": 252,
   "url": "/ai/01JB2K…"
@@ -791,12 +796,15 @@ limits:
   progress_max_per_task: 10
   ask_user_timeout_s: { default: 600, max: 1800 }
   wait_for_job_max_s: 1800
-pricing_usd_per_mtok:               # 응답의 model 기준으로 조회
-  claude-opus-5-5:   { input: 4.00, output: 20.00, cache_read: 0.20, cache_write: null }  # null = Phase 0 확인
-  claude-sonnet-5-5: { input: 2.00, output: 10.00, cache_read: null, cache_write: null }
+pricing_usd_per_mtok:               # 시도(usage.iterations)를 수행한 model 기준으로 조회. cache_write는 5분 TTL (1h는 2배)
+  claude-opus-5-5:   { input: 4.00, output: 20.00, cache_read: 0.20, cache_write: 5.00 }   # 1h TTL이면 8.00
+  claude-opus-5:     { input: 5.00, output: 25.00, cache_read: 0.50, cache_write: 6.25 }   # fallback 대상
+  claude-opus-4-8:   { input: 5.00, output: 25.00, cache_read: 0.50, cache_write: 6.25 }   # fallback 대상
+  claude-sonnet-5-5: { input: 2.00, output: 10.00, cache_read: 0.20, cache_write: 2.50 }   # 1h TTL이면 4.00
   claude-haiku-4-5:  { input: 1.00, output: 5.00,  cache_read: null, cache_write: null }
 unknown_cache_price: input_x2       # 미기입 단가는 input × 2로 보수 계산 + "추정" 표시
 unknown_model: abort                # 단가표에 없는 모델 응답 → 태스크 중단
+                                    # 시작 시 allowed_fallback_models 중 단가표에 없는 대상이 있으면 기동 실패 (9.3)
 prompt_version: ai-sys-v1
 transcript_retention_days: 90
 master:

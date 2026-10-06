@@ -74,7 +74,7 @@ getUpdates(offset=last_update_id+1, timeout=50,
 httpx read timeout = 65초, 연결 실패 시 백오프 1 → 2 → 4 … 최대 60초
 ```
 
-- `allowed_updates`에 없는 종류(`edited_message`, `channel_post`, `inline_query` 등)는 Telegram이 보내지 않는다. 수정된 메시지로 명령을 바꿔치기하는 경로가 없어진다.
+- `allowed_updates`에 없는 종류(`edited_message`, `channel_post`, `inline_query` 등)는 Telegram이 보내지 않는다(단, `getUpdates` 호출 전에 이미 생성된 update는 잠시 올 수 있다). 그래서 poller/gate는 `message`·`callback_query`·`my_chat_member` 외의 update 키를 가진 update를 무시하고 offset만 넘긴다. 수정된 메시지로 명령을 바꿔치기하는 경로가 없어진다.
 - **offset은 처리 전에 저장한다.** update를 받으면 `/var/lib/cluster-telegram/state.json`(`last_update_id`)을 먼저 기록(원자적 rename)하고 핸들러를 실행한다. 핸들러 도중 죽으면 그 update는 다시 오지 않는다 → 변경 작업은 **at-most-once**. 사용자는 결과가 없으면 다시 보낸다.
 - **오래된 update 거부**: `message.date`가 현재보다 120초 넘게 과거인 **변경 요청**(`/run`, `/sh`, `/cancel`, `/lockdown`, AI 텍스트)은 실행하지 않고 "오래된 요청이라 무시했습니다. 다시 보내주세요"라고 답한다. 조회 명령은 처리한다. 봇·master가 오래 내려갔다 올라왔을 때 쌓인 명령이 한꺼번에 실행되는 것을 막는다. 시간 동기화는 topology.md 4.4.
 - **시작 시 webhook 점검**: `getWebhookInfo`에 URL이 설정돼 있으면 우리가 설정한 적이 없으므로 **봇 토큰 유출 신호**다. `deleteWebhook` 후 master에 `security.telegram` 경보(`alert.raised`, critical)를 보고하고 토큰 교체(security.md 12.4)를 안내한다.
@@ -183,11 +183,13 @@ Wants=network-online.target
 [Service]
 User=cluster-telegram
 Group=cluster-telegram
-SupplementaryGroups=cluster-svc            # internal.sock 접근 (security.md 4.2)
+# internal.sock 접근 (security.md 4.2)
+SupplementaryGroups=cluster-svc
 ExecStart=/opt/cluster-web/venv/bin/python -m cluster_telegram
 LoadCredential=bot_token:/etc/cluster-telegram/credentials/bot_token
 LoadCredential=service_token:/etc/cluster-telegram/credentials/service_token
-StateDirectory=cluster-telegram            # /var/lib/cluster-telegram (offset만)
+# /var/lib/cluster-telegram (offset만)
+StateDirectory=cluster-telegram
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 ProtectProc=invisible
 MemoryMax=120M
@@ -290,7 +292,7 @@ update 수신
  └─ 명령/콜백/텍스트 → master 호출 (master가 최종 권한 판단, 거부 시 이유 한 줄)
 ```
 
-- 무시한 발신자에 대한 기록은 user_id·횟수·시각뿐이다. 1시간에 20회를 넘는 발신자는 master가 `security.telegram_probe` 감사 기록을 남기고 웹 보안 화면에 표시한다(텔레그램 알림은 하지 않음 — 알림 폭탄 방지).
+- 무시한 발신자에 대한 기록은 user_id·횟수·시각뿐이다. 1시간에 20회를 넘는 발신자는 master가 `telegram.probe` 감사 기록을 남기고 웹 보안 화면에 표시한다(텔레그램 알림은 하지 않음 — 알림 폭탄 방지).
 - 연결된 사용자의 요청이 권한 부족으로 거부되면 "권한이 없습니다 (필요: admin)"처럼 짧게 답한다. 연결되지 않은 발신자에게는 존재조차 드러내지 않는다.
 
 ### 5.2 텔레그램 채널 정책
@@ -567,6 +569,7 @@ stateDiagram-v2
 | `/cancel <id>` | 명령·잡 취소 (`#482`=명령, `J-1187`=잡) | operator+ (본인) / admin (타인) | 본인: 즉시 / 타인: 확인 버튼 + TOTP | v2b |
 | `/approvals` | 내가 텔레그램에서 결정할 수 있는 pending 승인 목록 (각각 버튼 메시지 재전송) | operator+ | 즉시 | v2b |
 
+- `/ai!`의 `!`는 Bot API 명령 이름 규칙(1~32자, 소문자 영문·숫자·밑줄)에 맞지 않아 `setMyCommands`에 등록할 수 없고, 클라이언트도 `/ai`(bot_command 엔티티) + 텍스트 `!`로 다룬다. 그래서 봇은 엔티티나 명령 이름이 아니라 **원문 텍스트가 `/ai!`로 시작하는지**(즉 `/ai`의 인자 첫 글자가 `!`인지)로 effort high를 판별한다. 엔티티 기준으로 분기하면 `/ai`(effort medium)로 잘못 처리된다.
 - `/run`에 쓸 수 있는 프리셋 목록은 `/run`만 입력하면 표시한다(내 역할 기준, master의 `/presets`와 같은 필터).
 - `/sh` 입력 메시지는 명령 원문을 담고 있으므로 처리 후 봇이 `deleteMessage`로 지우지 **않는다**(사용자가 무엇을 보냈는지 확인할 수 있어야 함). 대신 확인 메시지에 원문을 다시 보여준다.
 
@@ -602,7 +605,7 @@ stateDiagram-v2
 7. 승인이면 master가 **같은 트랜잭션에서** `pending → approved → consumed`로 바꾸고 저장된 payload로 실행을 시작한다(security.md 7.5-8, 1단계 모델). 요청 주체(AI·사용자)가 실행을 다시 요청하는 단계는 없다. 거절이면 `rejected`.
 8. `approval.decided` 이벤트 발행 → notifier가 **원래 메시지를 결과로 편집**하는 outbox 항목(`op=edit`, 버튼 제거)을 만든다. 웹에서 결정되거나 만료돼도 같은 방식으로 텔레그램 메시지가 "웹에서 승인됨 / 만료됨"으로 바뀐다.
 
-봇은 모든 콜백에 `answerCallbackQuery`로 짧은 토스트("승인됨", "만료된 요청")를 반드시 응답한다(버튼 로딩 표시 해제).
+봇은 모든 콜백에 **콜백 수신 즉시(결정 처리 전)** `answerCallbackQuery`로 짧은 토스트("처리 중", "TOTP 6자리를 보내주세요")를 반드시 응답한다(버튼 로딩 표시 해제). 결정 결과(승인됨·거부·만료됨)는 토스트가 아니라 8단계의 메시지 편집(`op=edit`) 또는 새 메시지로 알린다. 늦은 응답으로 생기는 `answerCallbackQuery`의 400 오류("query is too old" 등)는 무시 가능한 오류로 분류한다.
 
 ### 11.3 텔레그램 step-up (medium 이상)
 
@@ -631,6 +634,7 @@ sequenceDiagram
   U->>B: "[승인] 탭"
   B->>T: "callback_query (from.id, data, message_id=9001)"
   T->>T: "gate: 연결 캐시, 개인 채팅"
+  T->>B: "answerCallbackQuery: TOTP 6자리를 보내주세요"
   T->>U: "TOTP 6자리를 보내주세요"
   U->>B: "123456"
   B->>T: "message (6자리)"
@@ -638,7 +642,6 @@ sequenceDiagram
   T->>M: "POST /internal/tg/approvals/77/decide (nonce, y, 9001, totp)"
   M->>M: "11.2 검증 1~6, approved → consumed, 저장된 payload로 실행"
   M-->>T: ok
-  T->>B: "answerCallbackQuery: 승인됨"
   M->>M: "approval.decided → outbox op=edit (9001)"
   AI->>M: "GET outcome 77 → consumed, command_id 490"
   M->>M: "명령 실행 완료 … command.finished"
@@ -797,7 +800,7 @@ CREATE TABLE notification_outbox (
   silent          INTEGER NOT NULL DEFAULT 0, -- disable_notification
   dedupe_key      TEXT,
   payload_hash    TEXT,                       -- approval 메시지일 때 표시한 payload의 해시 (11.2-5)
-  status          TEXT NOT NULL,              -- pending | sending | sent | failed | dead | expired | cancelled
+  status          TEXT NOT NULL,              -- pending | sending | sent | dead | expired | cancelled
   attempts        INTEGER NOT NULL DEFAULT 0,
   next_attempt_at REAL NOT NULL,
   lease_until     REAL,
@@ -856,6 +859,7 @@ CREATE TABLE notification_prefs (
 |---|---|---|
 | 게이트 | 미연결·허용 목록 밖 사용자의 메시지, `/link`, 콜백 | 응답 없음(가짜 서버에 send 호출 0건), unknown 카운트 증가 |
 | 게이트 | 그룹 채팅 메시지, `chat.id != from.id`, 봇 발신자 | 무시 / 그룹 추가 시 `leaveChat` + 경보 |
+| 게이트 | `edited_message` update 주입 (`allowed_updates` 밖) | 무시, offset만 증가, master 호출 0건 |
 | 연결 | 만료 코드, 사용한 코드 재사용, 다른 사용자 코드, 대소문자·하이픈 변형 | 만료·재사용 거부, 변형은 허용 |
 | 연결 | `/link` 무차별 대입 6회 | 1시간 무응답, 코드 폐기 |
 | 연결 | 재연결 | 이전 채팅에 이동 알림, 이전 링크 revoked, 웹 알림 |

@@ -161,12 +161,13 @@ tailnet 계정 설정: IdP 계정 MFA 필수, **device approval 켬**, 사용자
 # rdkx3-01 (현재 master)에서만
 sudo tailscale serve --bg --https=443 http://127.0.0.1:8000
 tailscale serve status     # https://<기기이름>.<tailnet>.ts.net → 127.0.0.1:8000 확인
-tailscale funnel status    # 비어 있어야 함
+tailscale funnel status    # serve 설정을 함께 출력한다. 모든 항목이 (tailnet only)이고 "Funnel on"이 없어야 함
+                           # (또는 tailscale funnel status --json 에 AllowFunnel 키가 없어야 함)
 ```
 
 - TLS는 tailscaled가 `*.ts.net` 인증서로 종료한다. 웹 URL은 `https://<rdkx3-01 기기이름>.<tailnet>.ts.net`.
 - `tailscale serve`가 붙이는 `Tailscale-User-Login` 헤더는 **감사 로그 참고용**이다. 같은 호스트의 다른 프로세스가 127.0.0.1:8000에 직접 붙어 위조할 수 있으므로 인증 근거로 쓰지 않는다(4.3의 egress 차단으로 줄이지만 경계로 삼지 않음).
-- **failover 시 외부 경로 전환** ([topology.md](./topology.md) 7.3의 5단계): rdkx3-02에서 위 `tailscale serve` 명령을 실행한다. URL이 rdkx3-02의 MagicDNS 이름으로 바뀌므로 두 URL을 모두 북마크해 둔다. Origin 검사(5.3·5.6)의 허용 목록 `web.origins`에는 처음부터 **두 URL을 모두** 넣어 두고, 텔레그램 링크용 `web_base_url`은 failover 절차에서 `cluster-master-admin config set web_base_url <rdkx3-02 URL>`로 바꾼다. rdkx3-01이 살아 돌아오면 `tailscale serve reset` 후 붙인다.
+- **failover 시 외부 경로 전환** ([topology.md](./topology.md) 7.3의 5단계): rdkx3-02에서 위 `tailscale serve` 명령을 실행한다. URL이 rdkx3-02의 MagicDNS 이름으로 바뀌므로 두 URL을 모두 북마크해 둔다. Origin 검사(5.3·5.6)의 허용 목록 `web.origins`에는 처음부터 **두 URL을 모두** 넣어 두고, 텔레그램 링크용 `web_base_url`은 failover 절차에서 `cluster-master-admin config set web_base_url <rdkx3-02 URL>`로 바꾼다. rdkx3-01이 살아 돌아오면 프로필의 VIP를 먼저 제거하고([topology.md](./topology.md) 3.3·7.3) `tailscale serve reset` 후 붙인다.
 
 ### 3.5 대안 (B) Cloudflare Tunnel + Access (필요할 때만)
 
@@ -205,9 +206,15 @@ cluster-master는 **Uvicorn 단일 프로세스** 안에서 세 개의 리스너
 master.cluster.internal:443 {
   bind 192.168.1.200
   tls /etc/caddy/certs/master.crt /etc/caddy/certs/master.key
-  handle /ws/agent* { reverse_proxy 127.0.0.1:8001 }
-  handle /api/agent/* { reverse_proxy 127.0.0.1:8001 }
-  handle { respond 403 }
+  handle /ws/agent* {
+    reverse_proxy 127.0.0.1:8001
+  }
+  handle /api/agent/* {
+    reverse_proxy 127.0.0.1:8001
+  }
+  handle {
+    respond 403
+  }
 }
 ```
 
@@ -446,7 +453,7 @@ step-up 필요 작업:
 | 노드 전원 끄기 (`system.poweroff`) | "다시 켤 수 없음" 경고 + 노드 이름 입력 |
 | 사용자 생성·삭제·역할 변경, 다른 사용자의 TOTP/비밀번호 초기화 | — |
 | 노드 등록·삭제, agent 토큰 발급·폐기 | — |
-| 서비스 토큰 발급·교체, 텔레그램 연결 생성 | — |
+| 서비스 토큰 발급·교체, 텔레그램 연결 생성 | 텔레그램 연결 생성은 operator/admin만 (viewer는 TOTP가 선택이라 제외, 7.3) |
 | 보안 설정 변경 (`allow_shell`, 세션 정책, 허용 텔레그램 ID 등) | — |
 | AI 정책 변경 (툴 허용 목록, 비용 상한, 자동 승인 범위) | — |
 | lockdown 해제 | — |
@@ -665,7 +672,7 @@ flowchart LR
 - **명령과 잡 모두** 이 경로로 실행한다(`cluster-run` 실행도 포함). execd가 `systemd-run --unit=cluster-run-<run_id> --slice=<cluster-cmd.slice|cluster-jobs.slice> --pipe --wait --collect -p ...`로 transient service를 띄우고 출력을 소켓으로 중계한다. 실행 프로세스는 PID 1의 자식이므로 execd 자신은 강하게 샌드박스할 수 있다. 잡은 `run_id = attempt_id`다.
 - 취소: agent가 `cancel`을 보내거나 연결을 끊으면 execd가 `systemctl stop cluster-run-<run_id>.service`(cgroup 전체 종료: SIGTERM → `TimeoutStopSec=5` → SIGKILL). `setsid`·데몬화로 도망친 자식도 같이 죽는다. 예외: root_op의 `survive_disconnect`·`detach`(9.4).
 - agent는 `cluster-run`이 만든 경로를 **직접 열지 않는다.** 작업 디렉터리 생성, 번들 설치, 산출물 수집, 정리는 모두 execd 요청이다.
-- 요청 형식(JSON 한 줄, Python 3.8 호환 구현). `kind`는 `command` | `job` | `root_op` | `install_bundle` | `collect` | `cleanup` | `stop`:
+- 요청 형식(JSON 한 줄, Python 3.8 호환 구현). `kind`는 `command` | `job` | `root_op` | `install_bundle` | `collect` | `cleanup` | `stop` | `info`(격리 모드·cgroup 컨트롤러·정책 요약 조회, argv는 내보내지 않음). 연결 하나가 요청 하나를 나르며, 응답 이벤트 형식(`accepted`·`out`·`exit`·`rejected`·`file`/`data`/`file_end`·`collected`·`done`·`info`)과 취소 규칙(`{"op":"cancel"}` 줄 또는 연결 종료)은 구현 `execd/cluster_execd/protocol.py`가 정의한다:
 
 ```json
 {"v":1, "run_id":"r_01HZX...", "kind":"command", "mode":"shell", "as_root":false,
@@ -684,7 +691,7 @@ execd 검증 규칙:
 | `kind=root_op` | policy의 `root_ops`에 있는 id만. **argv·env·실행 모드는 노드 로컬 정책에서 가져오고** master가 보낸 argv는 무시. 파라미터는 로컬 enum/범위로 검증 |
 | `kind=job` | `kind=command`와 같은 검증 + 잡 고유 속성(`Nice`, `IOSchedulingClass`, slice)만 추가. 작업 디렉터리 `/var/lib/cluster-run/work/<attempt_id>`를 `cluster-run` 0700으로 만들고 번들·데이터 캐시를 읽기 전용 `BindReadOnlyPaths`로 붙인다 |
 | `kind=install_bundle` | agent가 `/var/lib/cluster-agent/incoming/<sha256>`에 받아 둔 파일의 sha256을 execd가 **다시 계산**해 일치할 때만, tar 목록 검사(절대 경로·`..`·링크·장치·setuid 거부)를 다시 하고 `/var/lib/cluster-run/cache/{bundles,data}/<sha256>/`에 root 소유 0755/0644로 풀어 원자적으로 rename |
-| `kind=collect` | 실행 uid(`cluster-run`)로 권한을 내린 자식 프로세스가 `openat(O_NOFOLLOW)`로 작업 디렉터리를 내려가며 `outputs.paths`에 맞는 **일반 파일만**, `st_nlink == 1`이고 소유 uid가 `cluster-run`인 것만, 열린 fd 기준 `fstat` 크기로 상한을 적용해 읽는다. 결과는 바이트 스트림으로 소켓에 넘기고 execd가 `/var/lib/cluster-agent/outbox/<attempt_id>/`에 `cluster-agent` 소유로 쓴다. 심볼릭 링크·하드 링크·디렉터리 링크·장치·FIFO는 건너뛰고 목록에 `skipped`로 남긴다 |
+| `kind=collect` | 실행 uid(`cluster-run`)로 권한을 내린 자식 프로세스가 `openat(O_NOFOLLOW)`로 작업 디렉터리를 내려가며 `outputs.paths`에 맞는 **일반 파일만**, `st_nlink == 1`이고 소유 uid가 `cluster-run`인 것만, 열린 fd 기준 `fstat` 크기로 상한을 적용해 읽는다. 결과는 바이트 스트림(파일별 sha256 포함)으로 소켓을 통해 agent에 넘기고, **agent가** `/var/lib/cluster-agent/outbox/<attempt_id>/`에 `O_NOFOLLOW`·`O_EXCL`로 직접 쓴다. root인 execd는 agent 소유 디렉터리에 쓰지 않는다(침해된 agent가 심어 둔 심볼릭 링크로 root 쓰기를 유도하는 경로 차단). 심볼릭 링크·하드 링크·디렉터리 링크·장치·FIFO는 건너뛰고 목록에 `skipped`로 남긴다 |
 | `kind=cleanup` / `stop` | `run_id` 형식 검증 후 그 run의 디렉터리 삭제 / 유닛 정지만 |
 | `limits` | policy의 `limits_max`로 잘라냄(clamp) |
 | `env` | 허용 키만: `LANG`, `TZ`, `PYTHONDONTWRITEBYTECODE`, `HOME`(작업 디렉터리로 강제), `CLUSTER_*`(**execd가 직접 생성**, 요청에 있으면 거부), 사용자 env는 `CW_` 접두사 키만(잡 명세의 `env`는 master가 `CW_<KEY>`로 재작성). agent의 환경변수는 넘기지 않음 |
@@ -782,7 +789,8 @@ sudo를 쓰지 않으므로 agent에 `NoNewPrivileges=yes`를 걸 수 있다.
 [Service]
 User=cluster-agent
 Group=cluster-agent
-SupplementaryGroups=video          # Pi: vcgencmd(/dev/vchiq). 필요 여부는 topology.md P7
+# Pi: vcgencmd(/dev/vchiq). 필요 여부는 topology.md P7
+SupplementaryGroups=video
 NoNewPrivileges=yes
 CapabilityBoundingSet=
 AmbientCapabilities=
@@ -1146,7 +1154,7 @@ v1 완료 전에 1~3단계를 한 번 연습한다(failover 리허설과 함께)
 | **3. 로그인·대시보드** | 콘솔 CLI로만 admin 생성 · Argon2id · operator/admin TOTP 강제 + 재사용 방지 · 세션 쿠키 속성·만료 · rate limit·잠금 · CSRF 토큰 + `web.origins` Origin 검사 · `/ws/ui` Origin 검사 · CSP·보안 헤더 · ESLint `react/no-danger` · ANSI 정화기 단위 테스트(OSC 52/8 제거) |
 | **4. 명령** | 7.3 RBAC table-driven 테스트 · `risk_of()` 단일 함수 · step-up(6장) · as_root는 execd 경유만, 프리셋 root 동작은 `root_op` · `detach`/`survive_disconnect` 동작 · 위험 패턴 확인 단계 · 모든 실행 감사 기록 · lockdown(16장) 동작 확인 · 새 기기 로그인 알림(웹) |
 | **5. 경고·이력 + 텔레그램 v1** | 14장 표 중 v1 해당(수신 방식, 허용 사용자, 개인 채팅, 계정 연결, 민감 정보, `/lockdown`) · 서비스 토큰 범위(12.2) · 마스킹 · 자유 텍스트 `<pre>` 규칙·URL 무력화 · 보안 경보 규칙: 감사 체인 실패, 중복 연결, 인증서 만료 30일, reboot-required, 백업 2시간 누락 · 감사 로그 화면에 삭제 기능 없음 |
-| **6. 배포·외부 접속** | `systemd-analyze security` 점수 기록 · tailnet ACL(3.3, 기본 정책 삭제, tests 통과) · `tailscale serve`만, `tailscale funnel status` 비어 있음 · LTE 등 외부망에서 공인 IP 포트 스캔 결과 열린 포트 없음 · tailnet 내 다른 기기에서 8000/8001 접근 불가 확인 · Caddy가 `/ws/agent`·`/api/agent/*` 외 403 · 백업 age 암호화 + 관리 PC 사본 + 복호화 복원 리허설 · 외부 dead-man 알림 동작 · 런북 1~3단계 연습 |
+| **6. 배포·외부 접속** | `systemd-analyze security` 점수 기록 · tailnet ACL(3.3, 기본 정책 삭제, tests 통과) · `tailscale serve`만, `tailscale funnel status` 출력이 모두 `(tailnet only)`이고 `Funnel on` 없음 · LTE 등 외부망에서 공인 IP 포트 스캔 결과 열린 포트 없음 · tailnet 내 다른 기기에서 8000/8001 접근 불가 확인 · Caddy가 `/ws/agent`·`/api/agent/*` 외 403 · 백업 age 암호화 + 관리 PC 사본 + 복호화 복원 리허설 · 외부 dead-man 알림 동작 · 런북 1~3단계 연습 |
 | **7·8. 잡 v1·v2** | transient unit 속성(11.2) 적용, 유닛 이름 `cluster-run-<attempt_id>` · operator는 템플릿만 · 임의 코드 잡 = high · 네트워크 모드 기본 `none` · 작업 디렉터리 격리·정리, agent는 cluster-run 경로를 직접 열지 않음 · limits clamp · 모드 B 노드에 임의 코드 잡 미배치 · 아티팩트 경로 검증(경로 순회 거부) · 아티팩트·로그 다운로드 헤더(5.6), **HTML·JS 아티팩트가 웹 origin에서 실행되지 않음** 테스트 · 잡 결과를 보안 결정에 쓰지 않음 |
 | **9. AI v1 + 텔레그램 v2a** | 15장 1·4·6~11 · 프롬프트 인젝션 테스트 시나리오 · 비용 상한·킬 스위치 · AI 주체로 승인 결정 API 호출 시 403 · internal 허용 목록 밖 라우트 403 · `auto_presets`에 root_op `logs.journal` 넣기 거부 테스트 · 전달 메시지 untrusted 처리 |
 | **10. 공통 승인 + 텔레그램 v2b** | 7.5 1~10 전부 · 승인 해시 불일치 시 실행 거부 · master 재시작 시 expire · 승인 nonce·만료·사용자 확인 테스트 · 텔레그램 medium 이상 결정에 TOTP 필수(침해된 봇 시뮬레이션: TOTP 없이 위조 결정 → 거부) · 4KB 명령 승인 메시지에 버튼 없음 · bidi·zero-width 명령 표시 테스트 |
@@ -1162,7 +1170,7 @@ v1 완료 전에 1~3단계를 한 번 연습한다(failover 리허설과 함께)
 | PLAN.md 12장 프로토콜 | 토큰은 `hello`가 아니라 업그레이드 요청 `Authorization: Bearer` 헤더로 · `exec`에 `as_root`, `root_op`, `limits`, `network` 필드 · `lockdown`/`unlock` 메시지 · `cmd_result.status`에 `scheduled`(detach) · close code 4401/4403/4409/4429 |
 | PLAN.md 8장 프리셋 | 프리셋의 root 동작은 `root_op: <id>` · `readonly: true` 필드 · sudoers 파일 없음 · `cluster-execd` 유닛과 `/etc/cluster-execd/policy.yaml` |
 | PLAN.md 17장 배포 | 리스너 3개(127.0.0.1:8000 / 127.0.0.1:8001 / UDS) · agent 설치 인자 `--master wss://master.cluster.internal/ws/agent --ca ca.pem --token-file -` · 시크릿은 `.env`가 아니라 `LoadCredential` |
-| PLAN.md 13장 데이터 모델 | `sessions`, `user_devices`, `totp`(암호화), `recovery_codes`, `telegram_links`, `service_tokens`, `approvals`(7.5), `system_state`, `system_settings`, `audit_log`(13.1) |
+| PLAN.md 13장 데이터 모델 | `sessions`, `user_devices`, `totp_secrets`(암호화), `recovery_codes`, `telegram_links`, `service_tokens`, `approvals`(7.5), `system_state`, `system_settings`, `audit_log`(13.1) |
 | topology.md | 웹 경로는 `tailscale serve → cluster-master(127.0.0.1:8000)`, Caddy는 agent 경로(VIP:443) 종료 전용 · Tailscale은 rdkx3-01·rdkx3-02에만 · 백업 암호화는 age, 관리 PC 사본 필수 · failover 시 승인은 7.5-3 규칙으로 만료, `web_base_url` 전환 · 배치 레이블·용량은 master 등록값이 권위 |
 | jobs.md | 모든 실행은 `cluster-run-<attempt_id>.service`(execd `kind=job`) · 경로 `/var/lib/cluster-run/{work,cache}` · 수집은 execd `collect` · operator는 템플릿 잡만 · 위험도는 `risk_of()` · 네트워크 모드 기본 `none` · limits는 노드 policy로 clamp · 아티팩트 경로 검증·다운로드 헤더 · 잡 결과는 신뢰할 수 없는 입력 |
 | telegram.md | 14장 · 승인 채널 규칙(7.3) · medium 이상 텔레그램 step-up · 텔레그램 셸 기본 off · critical 불가 · 승인 메시지 무절단 |

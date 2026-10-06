@@ -222,7 +222,7 @@ sequenceDiagram
 | 프로세스·격리 | systemd (transient unit, cgroup v2, 하드닝 옵션, `LoadCredential`) | security.md 9·11장 |
 | 네트워크 | Tailscale, Caddy(내부 CA), nftables, OpenSSH, chrony | security.md 3·4장 |
 | 백업 | `sqlite3 .backup` + `age` 암호화 + rsync over SSH(쓰기 전용 강제 명령) | topology.md 7.2 |
-| CI | GitHub Actions(커밋 SHA 고정), ruff, pytest(3.8·3.10 매트릭스), `npm ci --ignore-scripts`, gitleaks | security.md 17장 |
+| CI | GitHub Actions(커밋 SHA 고정), ruff, pytest(3.8·3.11·3.13 매트릭스), `npm ci --ignore-scripts`, gitleaks | security.md 17장 |
 
 ---
 
@@ -260,7 +260,7 @@ collector 구조: `collectors/base.py`(인터페이스 `static_info()`, `collect
 
 | 조건 | 수준 | 비고 |
 |---|---|---|
-| 노드 15초 이상 응답 없음 | critical (텔레그램은 60초 지속 시) | telegram.md 8.1 |
+| 노드 15초 이상 응답 없음 | 별도 `node.offline` 이벤트(경고 수준과 별개. 텔레그램은 60초 지속 시, 방해 금지 시간에는 보류 → 요약) | telegram.md 8.1 |
 | 온도 ≥ 70°C / ≥ 80°C | warning / critical | 70°C 이상 노드에는 신규 잡 배치 안 함(jobs.md 5.2) |
 | Pi 저전압 플래그 | warning | 현재 비트면 신규 잡 배치 안 함 |
 | 디스크 ≥ 90% | warning | |
@@ -402,7 +402,7 @@ collector 구조: `collectors/base.py`(인터페이스 `static_info()`, `collect
 | 항목 | 설계 |
 |---|---|
 | 해석 | "로컬 에이전트" = rdkx3-01에서 로컬로 도는 오케스트레이터(cluster-ai, RSS ≤150MB). 추론만 Claude API |
-| 모델 | `claude-opus-5-5`, `output_config.effort` 명시(기본 `medium`, 사용자가 `high` 선택 가능), thinking 파라미터 미전송(adaptive 상시), `tool_choice` auto, prefill 없음, `fallbacks="default"`, 툴 전부 `strict: true`, `stop_reason`이 `refusal`/`max_tokens`면 툴 실행 전에 중단 |
+| 모델 | `claude-opus-5-5`, `output_config.effort` 명시(기본 `medium`, 사용자가 `high` 선택 가능), thinking 파라미터 미전송(adaptive 상시), `tool_choice` auto, prefill 없음, `fallbacks="default"`, 툴은 `submit_job` 외 `strict: true`(길이·범위·개수 제약은 툴 함수·master가 검증), `stop_reason`이 `refusal`/`max_tokens`면 툴 실행 전에 중단 |
 | 툴 | 전용 typed 툴만: 읽기(상태·노드·메트릭·경고·프리셋·명령 결과·잡), 자동 진단 프리셋, `ask_user`, `send_progress`, 변경(`run_preset`, `run_shell`(admin, `as_root` 필드 없음), `submit_job`, 취소), `propose_plan`. 승인·사용자·토큰·보안·감사·AI 정책·as_root·cordon·로컬 셸·HTTP fetch는 툴이 없음 |
 | 권한 | `ai-operator` = 요청 사용자의 **현재** 권한 ∩ AI 채널 규칙 ∩ `ai_policy`. AI는 승인을 결정할 수 없음 |
 | 승인 | 변경은 단건 승인(payload 해시 바인딩, 10분), 사람이 승인하면 master가 실행. 계획 승인(v3)은 medium 이하·비코드 단계만 묶음(최대 30분) |
@@ -421,7 +421,7 @@ JSON 메시지, 모든 메시지에 `type` 필드. 토큰은 메시지가 아니
 
 | 방향 | type | 주요 필드 | 상세 |
 |---|---|---|---|
-| A→M | `hello` | node_id, board, agent_version, static_info(레이블·용량 보고값, isolation, datasets), running_tasks, unacked_results, orphaned | security.md 8장, jobs.md 13.1 |
+| A→M | `hello` | node_id, board, agent_version, static_info(레이블·용량 보고값, isolation, datasets), running_tasks, unacked_results(`task_result`·`cmd_result`), orphaned | security.md 8장, jobs.md 13.1 |
 | A→M | `metrics` | ts, cpu, mem, disk, net, temp_c, extra(허용 키), sched | 7장, jobs.md 5.1 |
 | A→M | `cmd_output` / `cmd_result` | run_id, stream, data / status(`ok`·`timeout`·`cancelled`·`error`·`scheduled`), exit_code, duration_ms | 8.3 |
 | A→M | `task_accept` · `task_reject` · `task_progress` · `task_output` · `task_result` · `work_request` | attempt_id 펜싱 | jobs.md 13.3 |
@@ -540,7 +540,7 @@ UI 보안 규칙: 노드·출력·AI 문자열은 React 텍스트 렌더링만(`
 
 | 계층 | 핵심 통제 |
 |---|---|
-| 외부 접속 | Tailscale만(인바운드 0), tailnet ACL은 관리자 그룹 → master 443·22만, 기본 정책 삭제, device approval, Funnel 금지, 웹은 LAN에도 비노출. Pi에는 Tailscale 미설치 |
+| 외부 접속 | Tailscale만(인바운드 0), tailnet ACL은 관리자 그룹 → master·standby(rdkx3-02)의 443·22만, 기본 정책 삭제, device approval, Funnel 금지, 웹은 LAN에도 비노출. Pi에는 Tailscale 미설치 |
 | 네트워크 | 리스너 3분리(web·agent 127.0.0.1, internal UDS), Caddy는 agent 경로만, nftables(입력 기본 drop, `cluster-run`의 내부 포트·tailnet·SSH egress 차단), SSH 키 전용·관리 PC/ProxyJump만 |
 | 웹 인증 | 콘솔에서만 admin 생성, Argon2id, operator/admin TOTP 필수, `__Host-` 세션 쿠키(SameSite=Strict, 유휴 30분·절대 12시간), rate limit·잠금, CSRF + Origin, CSP, 새 기기 로그인 텔레그램 알림 |
 | step-up | as_root, 전원 끄기, 사용자·노드·토큰·보안·AI 정책, lockdown 해제, 감사 내보내기 → TOTP 재입력(5분) |
@@ -703,7 +703,7 @@ flowchart LR
 
 | 범위 | 방법 |
 |---|---|
-| Agent collector | `vcgencmd`·`hrut_somstatus` 출력과 sysfs 내용을 fixture로(Phase 0 원문), 파싱 단위 테스트. Python 3.8·3.10 CI 매트릭스 |
+| Agent collector | `vcgencmd`·`hrut_somstatus` 출력과 sysfs 내용을 fixture로(Phase 0 원문), 파싱 단위 테스트. Python 3.8·3.11·3.13 CI 매트릭스 |
 | execd | 개발 Linux VM(systemd)에서 통합 테스트: policy 거부(`allow_shell`, as_root, 알 수 없는 root_op), limits clamp, env 허용 목록, `collect`의 심볼릭·하드·디렉터리 링크·FIFO·바꿔치기, 취소 시 자식 정리, `detach`·`survive_disconnect`, `cluster-run`이 토큰·소켓 접근 불가 |
 | Master | pytest + TestClient: 인증·세션·step-up, **RBAC table-driven(역할 × 채널 × 작업, security.md 7.3)**, `risk_of()` 표, **리스너별 라우트 스냅숏**, 가짜 agent WS로 프로토콜·상한·신원 고정, 감사 체인 직렬화·verify, 승인 해시·만료·재시작 expire |
 | 잡 | mock agent N개(`--mock-speed`, `--mock-fail-items`, `--mock-temp`, `--mock-freeze`) + 주입 가능한 clock으로 시나리오 T1~T10과 불변식(예약 장부, 성공 Attempt 1개), 아티팩트 경로 순회, 다운로드 헤더(jobs.md 22장) |
@@ -767,7 +767,7 @@ flowchart LR
 | Q14 | 텔레그램 | 마스킹된 출력 파일을 직접 요청할 때만 받는 opt-in 옵션이 필요한지 | 없음 (출력은 꼬리 N줄 + 웹) |
 | Q15 | 텔레그램 | `/lockdown`의 확인 버튼 1회 유지 vs 즉시 발동 | 확인 1회 |
 | Q16 | 텔레그램 | 시간대 Asia/Seoul, 방해 금지(v2) 기본값, 일일 요약(기본 off, 09:00), 계정 1:1 연결 제한 | 표기대로 |
-| Q17 | AI | 비용 상한(태스크 $1/high $2, 하루 $5, 한 달 $50). 하루 medium 10건이면 월 약 $63~78로 월 상한보다 높음 | 표기대로, 실사용 보고 조정 |
+| Q17 | AI | 비용 상한(태스크 $1/high $2, 하루 $5, 한 달 $50). 하루 medium 10건이면 월 약 $69~87로 월 상한보다 높음 | 표기대로, 실사용 보고 조정 |
 | Q18 | AI | `/cancel`의 기본 동작이 그 태스크가 시작한 실행 중 명령·잡까지 취소하는 것으로 맞는지(웹에는 "AI만 중단" 옵션) | 전부 취소 |
 | Q19 | AI | Anthropic 계정·조직 설정에서 API 데이터 보존·학습 사용 정책을 확인하고 받아들일 수 있는지 | 확인 필요 |
 
@@ -780,4 +780,4 @@ flowchart LR
 
 ### 21.3 Phase 0·구현 시 확인할 사실 (사용자 결정 아님)
 
-BPU 코어 지정·동시 공유 동작 · `systemd-run --uid --pipe --wait` 종료 코드 전달과 하드닝 속성 적용 여부 · `TemporaryFileSystem`+`BindPaths` 조합 · cgroup 컨트롤러 · ION/CMA 예약량 · needrestart 모드 · `journalctl --facility` 지원 · vcgencmd 권한 · Telegram Bot API 한도와 `<pre>` 안 자동 링크 여부 · anthropic SDK 세부(`fallbacks`·최상위 `cache_control` 전달 방식, `strict` 지정, 캐시 수명) · 캐시 쓰기 단가 · Tailscale과 nftables 공존 · Secure 쿠키의 `http://localhost` 동작.
+BPU 코어 지정·동시 공유 동작 · `systemd-run --uid --pipe --wait` 종료 코드 전달과 하드닝 속성 적용 여부 · `TemporaryFileSystem`+`BindPaths` 조합 · cgroup 컨트롤러 · ION/CMA 예약량 · needrestart 모드 · `journalctl --facility` 지원 · vcgencmd 권한 · Telegram Bot API 한도와 `<pre>` 안 자동 링크 여부 · anthropic SDK 세부(`fallbacks`·최상위 `cache_control` 전달 방식, `strict` 지정, 캐시 수명) · Tailscale과 nftables 공존 · Secure 쿠키의 `http://localhost` 동작.
