@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cluster-agent"
+version = "0.1.0"
+description = "Cluster Web node agent: metrics collection and command execution"
+readme = "README.md"
+# RDK X3 images based on Ubuntu 20.04 ship Python 3.8, so the agent stays 3.8-compatible.
+requires-python = ">=3.8"
+dependencies = [
+    "psutil>=5.6",
+    "websockets>=10.0",
+    "PyYAML>=5.3",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7", "pytest-asyncio>=0.21"]
+
+[project.scripts]
+cluster-agent = "cluster_agent.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["cluster_agent*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py38"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "BLE"]
+ignore = [
+    "S603",  # subprocess without shell: argv is built by the agent, not from user strings
+    "S607",  # partial executable path: vcgencmd/hrut_somstatus are resolved via PATH on purpose
+    "UP006", # keep typing.Dict/List for 3.8 runtime compatibility
+    "UP007",
+    "UP045",
+    "UP035",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101", "S108"]

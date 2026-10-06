@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  agent:
+    name: agent (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.8: RDK X3 Ubuntu 20.04 images. 3.11/3.13: Raspberry Pi OS bookworm/trixie.
+        python: ["3.8", "3.11", "3.13"]
+    defaults:
+      run:
+        working-directory: agent
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Lint
+        run: uvx ruff check . && uvx ruff format --check .
+      - name: Test
+        run: uv run --locked --python ${{ matrix.python }} --extra dev -- python -m pytest -q
