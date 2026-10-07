@@ -21,8 +21,8 @@
 
 | 호스트명 | 보드 | RAM | 유선 LAN | 역할 | 상주 서비스 |
 |---|---|---|---|---|---|
-| `rdkx3-01` | RDK X3 | 2GB 또는 4GB (Phase 0 확인) | 1Gbps | **master** + worker(축소) | cluster-master, cluster-agent, cluster-execd, cluster-telegram, cluster-ai, Caddy, tailscaled, chrony(서버) |
-| `rdkx3-02` | RDK X3 | 2GB 또는 4GB (Phase 0 확인) | 1Gbps | worker(BPU 주력) + **master 콜드 스탠바이** | cluster-agent, cluster-execd, tailscaled (master 계열 서비스는 설치만 하고 mask) |
+| `rdkx3-01` | RDK X3 | **4GB** (확정) | 1Gbps | **master** + worker(축소) | cluster-master, cluster-agent, cluster-execd, cluster-telegram, cluster-ai, Caddy, tailscaled, chrony(서버) |
+| `rdkx3-02` | RDK X3 | **4GB** (확정) | 1Gbps | worker(BPU 주력) + **master 콜드 스탠바이** | cluster-agent, cluster-execd, tailscaled (master 계열 서비스는 설치만 하고 mask) |
 | `rpi3-01` | Raspberry Pi 3B | 1GB | 100Mbps (USB2 버스 공유) | worker(CPU) | cluster-agent, cluster-execd |
 | `rpi3-02` | Raspberry Pi 3B | 1GB | 100Mbps (USB2 버스 공유) | worker(CPU) | cluster-agent, cluster-execd |
 | `rpi3-03` | Raspberry Pi 3B | 1GB | 100Mbps (USB2 버스 공유) | worker(CPU) | cluster-agent, cluster-execd |
@@ -53,12 +53,12 @@ agent는 접속 시 `hello.static_info`에 아래 레이블과 용량을 실어 
 | `bpu_slots` | BPU 잡 동시 실행 수 |
 | `job_mem_mb` | 이 노드에서 잡들이 쓸 수 있는 메모리 합계 (5장 공식) |
 
-노드별 기본값 (RAM 값은 Phase 0 실측 후 확정):
+노드별 기본값 (RDK X3는 4GB로 확정. 예약 메모리·execd RSS는 Phase 0 실측 후 6장 공식으로 재계산):
 
-| 호스트명 | 레이블 | slots | bpu_slots | job_mem_mb (2GB 보드 / 4GB 보드) |
+| 호스트명 | 레이블 | slots | bpu_slots | job_mem_mb |
 |---|---|---|---|---|
-| `rdkx3-01` | `board=rdkx3 arch=aarch64 bpu=2 net_mbps=1000 node_role=master storage=ssd*` | 1 (2GB에서 공식 < 256이면 0) | 1 (같음) | 공식 결과 / 1408 |
-| `rdkx3-02` | `board=rdkx3 arch=aarch64 bpu=2 net_mbps=1000 node_role=worker standby=master storage=sd` | 3 | 2 | 1024 / 2816 |
+| `rdkx3-01` | `board=rdkx3 arch=aarch64 bpu=2 net_mbps=1000 node_role=master storage=ssd*` | 1 | 1 | 1408 |
+| `rdkx3-02` | `board=rdkx3 arch=aarch64 bpu=2 net_mbps=1000 node_role=worker standby=master storage=sd` | 3 | 2 | 2816 |
 | `rpi3-0N` | `board=rpi3 arch=aarch64 bpu=0 net_mbps=100 node_role=worker storage=sd` | 2 | 0 | 384 (잠정) |
 
 `*` USB SSD를 붙인 경우. `slots`/`job_mem_mb`는 **잡**(큐 경유)에만 적용된다. 즉시 실행되는 **명령**은 슬롯을 차지하지 않고 노드당 동시 실행 상한(PLAN.md 8장, 기본 2)만 따른다. 두 경로 모두 agent의 같은 executor와 같은 실행 계정 `cluster-run`을 쓴다.
@@ -323,17 +323,18 @@ job_mem_mb = MemTotal(실측, BPU/멀티미디어 예약 메모리 제외 후)
 | cluster-master | ≤150MB | 300M | 평균 <5%, 피크 ≤100% | -800 |
 | cluster-agent | ≤40MB | 80M | <3% | -800 |
 | cluster-telegram | ≤60MB | 120M | 유휴 <1% | -300 |
-| cluster-ai (오케스트레이터만, **모델 추론 제외**) | ≤150MB | 300M | 유휴 <1% | -300 |
+| cluster-ai 오케스트레이터 | ≤60MB | 768M (slice: 아래 CLI 포함) | 유휴 <1% | -300 |
+| Claude Code CLI (cluster-ai 태스크 실행 중에만 존재, 발자국 미문서화 — Phase 9 실측) | ≤500MB (잠정) | (위 slice) | 태스크 중 ≤100% | -300 |
 | Caddy | ≤40MB | 100M | <2% | -300 |
 | tailscaled | ≤50MB | 100M | <2% | -300 |
-| cluster-execd (실행당, 2GB 기준 slots 1 + bpu 1 + 명령 2) | 25MB × 4 = 100MB (실측) | — | 순간 | -800 |
+| cluster-execd (실행당, slots 1 + bpu 1 + 명령 2) | 25MB × 4 = 100MB (실측) | — | 순간 | -800 |
 | cluster-backup (1시간마다 순간 실행) | ≤50MB | 100M | 순간 | 0 |
-| **상주 합계 (execd 최대치 포함)** | **≈890MB** | | **유휴 합계 <15%** | |
+| **상주 합계 (execd 최대치 포함, CLI 제외)** | **≈800MB** (+ AI 태스크 중 ≤500MB) | | **유휴 합계 <15%** | |
 | 여유분 | 300MB | | | |
-| **잡 할당 (`job_mem_mb`)** | **2GB: 공식 결과에 따름(아래 규칙) / 4GB: 1408MB** | `cluster-jobs.slice` 전체에 적용 | `CPUWeight` 낮게 | +500 |
+| **잡 할당 (`job_mem_mb`)** | **1408MB** (4GB 보드: 4096 − 800 − 500(AI 태스크 중) − 300 − 예약 메모리, 64MB 단위 내림. 예약 메모리 실측 후 재계산) | `cluster-jobs.slice` 전체에 적용 | `CPUWeight` 낮게 | +500 |
 
-- **2GB 보드 결정 규칙**: 공식 결과 `job_mem_mb < 256`이면 rdkx3-01은 `slots=0`, `bpu_slots=0`(잡 미배치, master 전용)으로 두고, ION/CMA 예약 축소(벤더 설정 도구 사용 가능 여부는 Phase 0 R6)를 먼저 검토한다. 256 이상이면 64MB 단위 내림 값을 쓴다. 2GB에서 예약 메모리가 크지 않으면 대략 384MB 안팎이 나온다(실측 전 추정).
-- **rdkx3-01에서는 LLM 추론을 돌리지 않는다.** 2GB 보드에서는 상주 서비스만으로 절반 가까이 쓰므로, 로컬 모델이 필요하면 rdkx3-02나 외부 PC/API에 둔다. 배치 결정은 [ai-agent.md](./ai-agent.md).
+- (2GB 보드를 쓰게 될 경우의 규칙) 공식 결과 `job_mem_mb < 256`이면 그 노드는 `slots=0`, `bpu_slots=0`(잡 미배치)으로 두고 ION/CMA 예약 축소를 먼저 검토한다. 현재 두 RDK X3는 4GB로 확정됐으므로 적용 대상이 없다.
+- **rdkx3-01에서는 LLM 추론을 돌리지 않는다.** 상주 서비스가 많은 master 노드이므로, 로컬 모델이 필요하면 rdkx3-02나 외부 PC/API에 둔다. 배치 결정은 [ai-agent.md](./ai-agent.md).
 - 메모리가 부족할 때 커널이 **잡 → 부가 서비스 → master/agent 순으로 죽이도록** OOMScoreAdjust를 건다. 이 설정은 cgroup 지원 여부와 무관하게 동작한다.
 - master 보호를 위해 rdkx3-01의 `slots=1`, `bpu_slots=1`로 낮춘다. BPU 잡은 rdkx3-02를 우선한다([jobs.md](./jobs.md)).
 - cgroup v2 cpu 컨트롤러가 있으면 cluster-master `CPUWeight=200`, 잡 slice `CPUWeight=50`.
@@ -348,7 +349,7 @@ job_mem_mb = MemTotal(실측, BPU/멀티미디어 예약 메모리 제외 후)
 | tailscaled | ≤50MB (평소 SSH용, failover 대비) |
 | cluster-execd (실행당 25MB × slots 3 + bpu 2 + 명령 2) | ≈175MB (실측) |
 | 여유분 | 300MB |
-| 잡 할당 | 2GB: 1024MB / 4GB: 2816MB (예약 메모리·execd 실측 후 조정) |
+| 잡 할당 | 2816MB (4GB 보드. 예약 메모리·execd 실측 후 조정) |
 
 failover로 master가 되면 6.2 표를 그대로 적용하고 `node_role=master`, `slots=1`, `bpu_slots=1`로 바꾼다.
 

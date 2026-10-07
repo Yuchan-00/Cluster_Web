@@ -93,11 +93,11 @@ def test_link_down_speed_ignored(make_sysfs):
 @pytest.mark.parametrize(
     "board, role, mem_mb, expected",
     [
-        ("rpi3", "worker", 948, {"slots": 2, "bpu_slots": 0, "job_mem_mb": 512}),
-        ("rdkx3", "worker", 1900, {"slots": 3, "bpu_slots": 2, "job_mem_mb": 1280}),
-        ("rdkx3", "worker", 3800, {"slots": 3, "bpu_slots": 2, "job_mem_mb": 3072}),
-        ("rdkx3", "master", 1900, {"slots": 1, "bpu_slots": 1, "job_mem_mb": 512}),
-        ("rdkx3", "master", 3800, {"slots": 1, "bpu_slots": 1, "job_mem_mb": 1536}),
+        ("rpi3", "worker", 948, {"slots": 2, "bpu_slots": 0, "job_mem_mb": 384}),
+        ("rdkx3", "worker", 1900, {"slots": 3, "bpu_slots": 2, "job_mem_mb": 1024}),
+        ("rdkx3", "worker", 3800, {"slots": 3, "bpu_slots": 2, "job_mem_mb": 2816}),
+        ("rdkx3", "master", 1900, {"slots": 1, "bpu_slots": 1, "job_mem_mb": 384}),
+        ("rdkx3", "master", 3800, {"slots": 1, "bpu_slots": 1, "job_mem_mb": 1408}),
     ],
 )
 def test_default_capacity_matches_topology_table(board, role, mem_mb, expected):
@@ -107,7 +107,7 @@ def test_default_capacity_matches_topology_table(board, role, mem_mb, expected):
 
 def test_configured_capacity_wins():
     cap = build_capacity("rpi3", {"mem_mb": "948"}, {"slots": 1})
-    assert cap == {"slots": 1, "bpu_slots": 0, "job_mem_mb": 512}
+    assert cap == {"slots": 1, "bpu_slots": 0, "job_mem_mb": 384}
 
 
 @pytest.mark.parametrize("node_id", ["rpi3-01\n", "rpi3-01\n\n"])

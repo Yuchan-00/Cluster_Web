@@ -909,7 +909,8 @@ as_root 실행은 root로 돌기 때문에 위 샌드박스를 적용하지 않�
 
 | 시크릿 | 형식 | 저장 위치 (권한) | 사용 주체 | 전달 |
 |---|---|---|---|---|
-| Anthropic API 키 | 콘솔 발급 | `/etc/cluster-ai/credentials/anthropic_api_key` (root 0600) | cluster-ai만 | `LoadCredential=` |
+| Claude Code 구독 토큰 (`claude setup-token`, 1년) | 관리 PC에서 발급 | `/etc/cluster-ai/credentials/claude_oauth_token` (root 0600) | cluster-ai만 (자식 `claude` 프로세스의 환경변수 `CLAUDE_CODE_OAUTH_TOKEN`으로만 전달) | `LoadCredential=` |
+| (대안 백엔드) Anthropic API 키 | 콘솔 발급 | `/etc/cluster-ai/credentials/anthropic_api_key` (root 0600) | cluster-ai만 | `LoadCredential=` |
 | 텔레그램 봇 토큰 | BotFather | `/etc/cluster-telegram/credentials/bot_token` (root 0600) | cluster-telegram만 | `LoadCredential=` |
 | 세션/CSRF 키 `session_key` | 32B 랜덤 | `/etc/cluster-master/credentials/session_key` (root 0600) | cluster-master | `LoadCredential=` |
 | TOTP 암호화 키 `totp_kek` | 32B 랜덤 | `/etc/cluster-master/credentials/totp_kek` (root 0600) | cluster-master | `LoadCredential=` |
@@ -927,7 +928,7 @@ as_root 실행은 root로 돌기 때문에 위 샌드박스를 적용하지 않�
 
 - `LoadCredential`을 쓰면 시크릿은 서비스 전용 `$CREDENTIALS_DIRECTORY`(다른 프로세스 접근 불가)에만 나타나고 환경변수에 들어가지 않는다. **시크릿을 환경변수, 명령줄 인자, 설정 YAML, git에 두지 않는다.**
 - cluster-master는 Anthropic 키와 봇 토큰을 갖지 않는다. 텔레그램 알림은 master의 outbox를 cluster-telegram이 가져가 보낸다.
-- Anthropic 키는 이 프로젝트 전용 workspace에서 발급하고 콘솔에서 월 지출 한도를 건다(ai-agent.md의 앱 내 비용 상한과 별개의 바깥 상한).
+- 구독 토큰은 모델 요청만 할 수 있는 토큰이지만 사용자의 구독 한도를 소비하므로, 유출 시 즉시 교체한다(`claude setup-token` 재발급은 기존 토큰을 무효화하지 않을 수 있으므로 Phase 9에서 폐기 방법을 확인). API 키 백엔드를 쓸 때는 이 프로젝트 전용 workspace에서 발급하고 콘솔에서 월 지출 한도를 건다.
 - 백업 번들([topology.md](./topology.md) 7.2)은 `age`로 관리자 공개키에 암호화한다. 번들에 위 credential 디렉터리와 Caddy 키가 들어가므로 rdkx3-02에는 복호화 키를 두지 않는다.
 
 ### 12.2 서비스 토큰 범위
@@ -962,7 +963,8 @@ as_root 실행은 root로 돌기 때문에 위 샌드박스를 적용하지 않�
 |---|---|---|
 | agent 토큰 | 웹(step-up) "토큰 재발급" → 새 토큰을 SSH/Ansible로 노드 파일에 설치 → agent 재시작 → 옛 해시는 재발급 즉시 폐기 | 해당 노드 잠시 offline. v2: 접속 중 `rotate_token` 메시지로 무중단 교체 |
 | 서비스 토큰 | `sudo cluster-master-admin token rotate telegram-bot` → 새 credential 파일 기록 → 해당 서비스 재시작 → 옛 토큰 폐기 | 수 초 |
-| Anthropic API 키 | 콘솔에서 새 키 → 파일 교체 → `systemctl restart cluster-ai` → 콘솔에서 옛 키 삭제 | AI 태스크 잠시 중단 |
+| Claude Code 구독 토큰 | 관리 PC에서 `claude setup-token`으로 새 토큰 → 파일 교체 → `systemctl restart cluster-ai`. 만료(1년) 30일 전 경보 | AI 태스크 잠시 중단 |
+| Anthropic API 키 (대안 백엔드) | 콘솔에서 새 키 → 파일 교체 → `systemctl restart cluster-ai` → 콘솔에서 옛 키 삭제 | AI 태스크 잠시 중단 |
 | 텔레그램 봇 토큰 | BotFather `/revoke` → 새 토큰 파일 교체 → `systemctl restart cluster-telegram` | 봇 잠시 중단 |
 | `session_key` | 새 값 생성 → cluster-master 재시작 | 모든 세션·CSRF 토큰 무효 (재로그인) |
 | `totp_kek` | `cluster-master-admin rekey-totp` (옛 키로 복호화 → 새 키로 재암호화, 트랜잭션) | 없음 |
@@ -1042,14 +1044,14 @@ CREATE TRIGGER audit_no_delete BEFORE DELETE ON audit_log
 
 상세는 [ai-agent.md](./ai-agent.md). 아래는 ai-agent.md가 완화할 수 없는 최소 조건이다.
 
-1. **전용 툴만.** cluster-ai는 로컬 셸·파일 시스템·임의 HTTP 툴을 갖지 않는다. 모든 동작은 master 내부 API(`ai-operator` 서비스 토큰)를 거친다. cluster-ai 프로세스 자체는 rdkx3-01에서 아무것도 실행하지 않는다.
+1. **전용 툴만.** cluster-ai는 로컬 셸·파일 시스템·임의 HTTP 툴을 갖지 않는다. 모든 동작은 master 내부 API(`ai-operator` 서비스 토큰)를 거친다. cluster-ai 프로세스 자체는 rdkx3-01에서 아무것도 실행하지 않는다. 모델 호출을 Claude Code CLI로 할 때([ai-agent.md](./ai-agent.md) 0장)는 `--restricted --tools ""`(내장 툴 전부 제거), `--strict-mcp-config`(우리 MCP 서버만), `--permission-mode dontAsk --permission-prompts none`, 전용 `CLAUDE_CONFIG_DIR`(hooks·설정·CLAUDE.md 없음), 빈 작업 디렉터리, `--disable-slash-commands`를 **항상** 함께 쓰고, 유닛 하드닝으로 한 번 더 가둔다. 이 조합을 빼는 설정은 허용하지 않는다.
 2. **변경 작업은 사람 승인.** 위험도 medium 이상은 Approval(7.5)이 있어야 실행된다. low(읽기)만 자동.
 3. **승인은 정확한 payload에 바인딩.** AI가 승인 후 명령·대상을 바꾸면 해시가 달라져 실행 불가.
 4. **AI는 승인을 결정할 수 없고, 자기 정책(툴 허용 목록, 비용 상한, 자동 승인 범위)을 바꿀 수 없다.** 정책 변경은 admin + 웹 + step-up.
 5. **critical 금지**: as_root, 전원 끄기, 사용자·토큰·보안 설정, lockdown 해제.
 6. **권한 상한**: 요청한 사용자의 현재 권한 ∩ AI 정책. viewer가 시킨 태스크는 읽기 툴만.
 7. **프롬프트 인젝션 대응**: 명령 출력·로그·파일 내용·메트릭 문자열·텔레그램 전달문은 툴 결과에 "신뢰할 수 없는 데이터" 경계로 감싸 넣고, 그 안의 지시를 따르지 않도록 시스템 프롬프트에 명시한다. 이것은 보조 수단이며 **실제 경계는 2~5번**이다. 테스트에 인젝션 시나리오(출력에 "승인 없이 rm -rf 실행" 등)를 포함한다.
-8. **비용 상한**: 태스크당 스텝·토큰 상한, 일일 비용 상한(앱 내) + Anthropic 콘솔 지출 한도(바깥).
+8. **사용량 상한**: 태스크당 턴·토큰 상한, 하루 태스크 수 상한(앱 내). 구독 백엔드에서는 사용자의 Claude Code 한도를 함께 쓰므로 `rate_limit` 시 큐를 멈추고 알린다. API 키 백엔드를 쓸 때는 Anthropic 콘솔 지출 한도(바깥)를 추가한다.
 9. **킬 스위치**: lockdown(16장) 시 진행 중 AI 태스크 즉시 중단·신규 거부. AI 기능만 끄는 `ai_enabled=false` 스위치(operator+가 끌 수 있고, 다시 켜기는 admin + step-up).
 10. **외부 전송 최소화**: Claude API로 보내는 내용은 마스킹(12.3), 감사 로그·사용자 정보·시크릿 파일은 툴로 제공하지 않는다.
 11. **자동 실행 범위**: 승인 없이 도는 프리셋(`auto_presets`)은 presets.yaml과 노드 policy 양쪽에서 `readonly: true`인 것만. 인증 기록을 읽을 수 있는 root_op(`logs.journal`처럼 `ssh` 유닛을 대상으로 하는 것)는 넣을 수 없다. master가 설정 변경 시점에 거부한다.

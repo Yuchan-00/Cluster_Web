@@ -15,13 +15,15 @@ _MB = 1024 * 1024
 
 
 def _default_capacity(board: str, role: str, mem_mb: Optional[int]) -> Dict[str, int]:
+    # Values from docs/design/topology.md 1.2 (RDK X3 = 4GB confirmed; 2GB kept for safety).
+    # They are only a proposal: the master's registered capacity is authoritative.
     big = mem_mb is not None and mem_mb >= 3 * 1024  # 4GB board (2GB boards report < 3GB)
     if board == "rdkx3":
         if role == "master":  # keep the master responsive: one job slot only
-            return {"slots": 1, "bpu_slots": 1, "job_mem_mb": 1536 if big else 512}
-        return {"slots": 3, "bpu_slots": 2, "job_mem_mb": 3072 if big else 1280}
+            return {"slots": 1, "bpu_slots": 1, "job_mem_mb": 1408 if big else 384}
+        return {"slots": 3, "bpu_slots": 2, "job_mem_mb": 2816 if big else 1024}
     if board == "rpi3":
-        return {"slots": 2, "bpu_slots": 0, "job_mem_mb": 512}
+        return {"slots": 2, "bpu_slots": 0, "job_mem_mb": 384}
     generic_mem = 256 if mem_mb is None else max(256, (mem_mb - 1024) // 64 * 64)
     return {"slots": 1, "bpu_slots": 0, "job_mem_mb": generic_mem}
 

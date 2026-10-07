@@ -1,6 +1,6 @@
 # AI 운영 에이전트 (cluster-ai) 설계
 
-> 텔레그램이나 웹에서 자연어로 지시하면 rdkx3-01에서 도는 `cluster-ai`가 계획을 세우고, master API를 감싼 전용 툴로 실행한 뒤 보고한다. 모델 추론은 Claude API(`claude-opus-5-5`)로 한다. 클러스터를 바꾸는 동작은 모두 사람이 승인한 payload와 정확히 일치할 때만 실행된다.
+> 텔레그램이나 웹에서 자연어로 지시하면 rdkx3-01에서 도는 `cluster-ai`가 계획을 세우고, master API를 감싼 전용 툴로 실행한 뒤 보고한다. 모델 추론은 사용자의 Claude Code 구독으로 Claude Code CLI(print 모드)를 통해 한다(0장). 클러스터를 바꾸는 동작은 모두 사람이 승인한 payload와 정확히 일치할 때만 실행된다.
 
 **관련 문서**: [PLAN.md](../PLAN.md) · [topology.md](./topology.md) · [security.md](./security.md) · [jobs.md](./jobs.md) · [telegram.md](./telegram.md)
 
@@ -10,7 +10,80 @@
 | 승인(approvals) 테이블, 위험도 등급, RBAC·채널 규칙, step-up, 마스킹(`redact`), 서비스 토큰, lockdown | 사용만 | [security.md](./security.md) 6·7·12·15·16장 |
 | 잡 명세, 스케줄러, `POST /jobs`의 `202 {approval_id}` 동작 | 사용만 | [jobs.md](./jobs.md) 4·14·16장 |
 | 텔레그램 메시지 렌더링, 버튼, 명령어 파싱, outbox 전송 | 이벤트·요구사항만 | [telegram.md](./telegram.md) |
-| rdkx3-01 메모리·CPU 예산 (cluster-ai ≤150MB) | 사용만 | [topology.md](./topology.md) 6.2절 |
+| rdkx3-01 메모리·CPU 예산 (cluster-ai 오케스트레이터 ≤60MB + 태스크 중 Claude Code CLI ≤500MB) | 사용만 | [topology.md](./topology.md) 6.2절 |
+
+---
+
+## 0. 결정 변경 (2026-10-07): 모델 사용량은 사용자의 Claude Code 구독으로
+
+사용자가 AI 에이전트의 모델 사용량을 API 키 과금이 아니라 **자기 Claude Code 구독**으로 처리하기로 했다(PLAN.md 2장 R4). 이 장은 공식 문서로 확인한 사실, 그에 따른 실행 방식의 변경, 그리고 Phase 9에서 개정해야 하는 절을 정리한다. **security.md 15장의 보안 경계는 그대로이고, 이 문서의 1~17장은 그 경계 안에서 "모델을 어떻게 호출하는가"만 바뀐다.**
+
+### 0.1 확인한 사실 (Claude Code 공식 문서, 2026-10-07 조회)
+
+| 사실 | 출처 |
+|---|---|
+| `claude setup-token`은 **1년짜리 OAuth 토큰**을 만든다. 용도는 "CI 파이프라인, 스크립트, 브라우저 로그인이 불가능한 환경". `CLAUDE_CODE_OAUTH_TOKEN` 환경변수로 쓰며 Pro/Max/Team/Enterprise 구독이 필요하다. 모델 요청만 할 수 있다(Remote Control·claude.ai 커넥터 불가). 로컬 MCP 서버는 동작한다 | code.claude.com/docs/en/authentication (Generate a long-lived token) |
+| `claude -p`(print 모드)는 스크립트용 비대화 실행이다. `--bare`(간소 모드)는 **OAuth 자격증명을 읽지 않으므로** 구독으로 쓰려면 `--bare`를 쓸 수 없다 | code.claude.com/docs/en/headless |
+| GitHub Action은 `CLAUDE_CODE_OAUTH_TOKEN`(구독)과 `ANTHROPIC_API_KEY` 둘 다 공식 지원한다 | code.claude.com/docs/en/github-actions |
+| **Claude Agent SDK**(Python/TS 라이브러리): "사전 승인 없이는 제3자 개발자가 자기 제품에 claude.ai 로그인이나 구독 한도를 제공하는 것을 허용하지 않는다. Agent SDK로 만든 에이전트도 포함된다. API 키 인증을 쓰라" | code.claude.com/docs/en/agent-sdk/overview |
+| 구독 로그인 전용 `CLAUDE_CONFIG_DIR`로 계정별 설정·자격증명 디렉터리를 분리할 수 있다(Linux: `<dir>/.credentials.json`, 0600) | authentication (Log in with multiple accounts, Credential management) |
+| 시스템 요구: Linux(Ubuntu 20.04+), x64 또는 **ARM64**, RAM 4GB+ | code.claude.com/docs/en/setup |
+| `--tools ""`는 내장 툴 전부 제거(MCP 툴은 영향 없음). `--restricted`는 명령·코드 실행 툴과 WebFetch를 제거하고 파일 툴을 작업 디렉터리에 가두며, managed 설정과 `--settings`만 읽고 `bypassPermissions`를 거부한다(v2.1.248+). `--strict-mcp-config --mcp-config`는 지정한 MCP 서버만 연결. `--permission-mode dontAsk`는 프롬프트가 필요한 호출을 전부 거부. `--permission-prompts none`(v2.1.259+)은 사람에게 묻는 툴 제거. `--system-prompt-file`은 기본 시스템 프롬프트 **전체 교체**. `--max-turns`, `--json-schema`(구조화 최종 출력), `--output-format stream-json --verbose`(이벤트 스트림, 마지막 `result`에 `usage`·`total_cost_usd` 추정치), `--no-session-persistence`, `--disable-slash-commands`, `--model`, `--effort` | code.claude.com/docs/en/cli-reference, headless |
+| 재시도 이벤트 `system/api_retry`의 `error` 분류에 `rate_limit`, `authentication_failed`, `billing_error`, `overloaded` 등이 있다. 구독의 5시간/주간 한도에 걸렸을 때의 동작은 **문서화되어 있지 않다** | headless (Handle API retries) |
+
+### 0.2 해석과 결정
+
+- **허용된 길은 "Claude Code 자체를 스크립트로 실행"하는 것이다.** `claude -p` + `claude setup-token`은 스크립트·CI 용도로 문서화되어 있고, 사용자가 자기 구독을 자기 장비에서 자기 자동화에 쓰는 경우다. 반대로 **Agent SDK 라이브러리로 에이전트를 만들어 구독 로그인을 쓰는 것은 명시적으로 허용되지 않는다.** 그래서 cluster-ai는 Agent SDK(Python 패키지)나 anthropic SDK가 아니라, **Claude Code CLI를 print 모드 자식 프로세스로 구동하는 오케스트레이터**가 된다.
+- 문서는 "개인이 자기 장비에서 돌리는 헤드리스 오케스트레이터"라는 우리 경우를 정확히 다루지는 않는다. 사용자가 이 전제(개인 사용, 제품 제공 아님)를 받아들였고, 정책이 바뀔 수 있으므로 **백엔드는 교체 가능하게** 만든다: 같은 CLI에 `ANTHROPIC_API_KEY`를 주면 그대로 API 키 과금으로 바뀐다(이때는 `--bare`도 가능). anthropic SDK 직접 호출 백엔드(기존 3장)는 설계로만 남긴다.
+- 사용자의 대화형 Claude Code 사용과 **같은 구독 한도**를 나눠 쓴다. 그래서 상한은 달러가 아니라 사용량(태스크당 턴·토큰, 하루 태스크 수)과 조용한 시간(quiet hours)으로 두고, 한도 초과(`rate_limit`)가 나면 AI 큐를 멈추고 텔레그램으로 알린다.
+
+### 0.3 실행 방식 (cluster-ai → Claude Code CLI)
+
+```text
+cluster-ai (Python 3.10, 계정 cluster-ai, 하드닝 유닛)
+  └─ 태스크마다 1회:  claude -p <지시> \
+        --restricted --tools "" \                       # 내장 툴 전부 제거 + 제한 모드
+        --strict-mcp-config --mcp-config /etc/cluster-ai/mcp.json \   # 우리 MCP 서버만
+        --permission-mode dontAsk --permission-prompts none \
+        --disable-slash-commands --no-session-persistence \
+        --system-prompt-file /etc/cluster-ai/system_prompt.txt \      # 11장 초안을 전체 교체용으로
+        --model <ai_policy.model> --effort <ai_policy.effort> \
+        --max-turns <ai_policy.max_turns> \
+        --output-format stream-json --verbose \
+        --json-schema <최종 보고 스키마>
+     환경: CLAUDE_CONFIG_DIR=/var/lib/cluster-ai/claude (cluster-ai 소유, 0700)
+           CLAUDE_CODE_OAUTH_TOKEN=<LoadCredential 파일에서 읽어 자식에게만 전달>
+           HOME=/var/lib/cluster-ai, cwd=/var/lib/cluster-ai/work/<task_id> (빈 디렉터리, .claude 없음)
+           PATH 최소, 그 외 환경변수 없음
+  └─ MCP 서버 `cluster` (stdio, 같은 cluster-ai 계정): 4장의 전용 툴을 MCP 툴로 노출.
+     각 툴은 master 내부 API를 ai-operator 서비스 토큰 + ai_task_id로 호출한다. 변경 툴은 승인을 만들고
+     결과를 기다린다(5장). 승인·실행 주체는 master다.
+```
+
+- `--bare`는 쓰지 않는다(OAuth를 읽지 않음). 대신 `--restricted`, `--tools ""`, 전용 `CLAUDE_CONFIG_DIR`(설정·hooks·CLAUDE.md 없음), 빈 작업 디렉터리, `--strict-mcp-config`로 "cluster-ai가 호스트에서 아무것도 실행하지 않는다"(security.md 15장 1항)를 지킨다. 유닛 하드닝(ProtectSystem=strict, InaccessiblePaths 등)이 마지막 층이다.
+- 승인 게이트는 Claude Code의 권한 프롬프트가 아니라 **master의 approvals**다(5장, security.md 7.5). MCP 툴은 Claude Code 입장에서는 항상 허용된 툴이고, 실제 실행 여부는 master가 결정한다. `--permission-prompt-tool`은 쓰지 않는다(중복 경계).
+- 스트림의 `assistant`/`user`(tool_result) 메시지를 transcript(14장 `ai_task_events`)에 저장하고, `result`의 `usage`로 사용량 원장을 쓴다. `total_cost_usd`는 구독에서는 과금과 무관한 추정치이므로 참고값으로만 기록한다.
+- 태스크 중단(`/cancel`): 자식에 SIGINT(턴 종료) → 5초 후 SIGTERM. 진행 중이던 명령·잡 취소는 기존 6.3 규칙대로 master가 한다.
+- `rate_limit`/`billing_error`/`authentication_failed`: 태스크를 `failed(reason=...)`로 끝내고, `rate_limit`은 AI 큐를 `ai_policy.rate_limit_pause_min`(기본 30분) 동안 멈춘 뒤 재시도한다. 알림은 telegram.md 경로. 토큰 만료(1년)는 만료 30일 전부터 경보한다(`claude auth status`를 주 1회 실행해 확인).
+- 모델: `--model`에 `ai_policy.model`(기본 `opus`, 구독에서 쓸 수 있는 별칭)을 넘긴다. 구독에서 선택 가능한 모델은 Anthropic이 정하므로 ID를 고정하지 않는다.
+
+### 0.4 리소스·설치 (Phase 9에서 실측)
+
+- Claude Code CLI 네이티브 바이너리(Linux ARM64) 또는 npm 패키지(Node.js 22+). 설치는 security.md 17장 규칙대로(서명 확인 가능한 경로, `curl | bash` 금지 — 네이티브 설치 스크립트 대신 체크섬을 확인한 바이너리를 Ansible로 배치하거나 npm으로 설치).
+- 메모리: CLI 프로세스는 태스크 동안만 살고, 발자국은 문서화되어 있지 않다. 잠정 예산 ≤500MB, `cluster-ai.slice` `MemoryMax=768M`(topology.md 6.2). 이 때문에 rdkx3-01의 잡 할당(1408MB)은 여유분에서 흡수되는지 Phase 0에서 예약 메모리와 함께 확인한다.
+- 로그인: 관리 PC에서 `claude setup-token`으로 토큰을 만들어 `/etc/cluster-ai/credentials/claude_oauth_token`(root 0600, `LoadCredential`)에 둔다. 토큰은 security.md 12장 시크릿 목록에 추가하고 교체 절차(연 1회)를 따른다. 사용자 본인의 대화형 로그인과 별개 토큰이다.
+
+### 0.5 Phase 9에서 개정할 절
+
+| 절 | 현재 내용 | 개정 방향 |
+|---|---|---|
+| 1.1 표 | Agent SDK 기각(원시 셸 때문) | 기각 사유는 유효. 채택안은 "Claude Code CLI print 모드 + 내장 툴 전부 제거 + 우리 MCP 툴"로 바꾼다 |
+| 3장 | anthropic SDK 파라미터(fallbacks, task_budget, strict 툴) | CLI 플래그(0.3)로 대체. `strict`·`task_budget`·`fallbacks`는 CLI가 대신 처리하므로 삭제 |
+| 4.4~4.5 | 툴 스키마·결과 형식 | MCP 툴 스키마(JSON Schema)로 동일하게 유지. untrusted 경계 마커는 MCP 툴 결과 텍스트에 그대로 적용 |
+| 9장 | 달러 상한, 단가표, 사전 예측 차단 | 턴·토큰·태스크 수 상한, quiet hours, rate_limit 처리로 대체. 단가표 삭제 |
+| 11장 | 시스템 프롬프트 초안 | `--system-prompt-file` 전체 교체용으로 사용(기본 프롬프트의 코딩 지침은 들어오지 않으므로 툴 사용 원칙을 빠짐없이 적는다) |
+| 13.1 | config.yaml의 모델·단가 | `claude_bin`, `config_dir`, `mcp_config`, `max_turns`, `quiet_hours`, `rate_limit_pause_min`, `backend: subscription \| api_key` |
+| 15장 | 스텁 모델 서버로 하네스 테스트 | 가짜 `claude` 실행 파일(stream-json을 흘리는 스크립트)로 대체 |
 
 ---
 

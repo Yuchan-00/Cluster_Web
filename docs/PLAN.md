@@ -58,6 +58,8 @@
 | D6 | 프론트엔드 | **React + TypeScript + Vite (권장안)** | 빌드는 CI에서, 정적 산출물만 master에 배포 |
 | R1 | 추가 요구 | **보안 최우선** | security.md가 기준선. 각 Phase는 보안 체크리스트 통과가 완료 조건(18장) |
 | R2 | 추가 요구 | **요청 작업 완료 시 텔레그램 보고** | [telegram.md](./design/telegram.md) 6장. MVP(Phase 5)에 포함 |
+| D7 | RDK X3 RAM | **4GB** (2026-10-07) | topology.md 1.2·6장 용량값 확정 |
+| R4 | 추가 요구 | **AI 사용량은 Claude Code 구독으로** (2026-10-07) | API 키 과금 전제를 바꿈 → [ai-agent.md](./design/ai-agent.md) 0장. 보안 경계(security.md 15장)는 불변 |
 | R3 | 추가 요구 | **가능하면 서버의 로컬 에이전트가 자연어 지시 수행** | [ai-agent.md](./design/ai-agent.md): 에이전트 프로세스는 rdkx3-01에서 로컬로, 모델 추론만 Claude API(`claude-opus-5-5`). 보드에서 LLM을 돌리는 것은 비현실적(RAM·BPU 특성)이라 기각. Claude Agent SDK(원시 셸 내장)는 RBAC·승인을 우회하므로 기각하고 우리 API를 감싼 전용 툴만 노출 |
 
 ---
@@ -68,8 +70,8 @@
 
 | 호스트명 | 보드 | 역할 | 상주 서비스 | 잡 용량 (slots / bpu_slots / job_mem_mb) |
 |---|---|---|---|---|
-| `rdkx3-01` | RDK X3 (2GB/4GB, Phase 0 확인) | **master** + worker(축소) | cluster-master, cluster-telegram, cluster-ai, cluster-agent, cluster-execd, Caddy, tailscaled, chrony 서버 | 1 / 1 / 2GB는 공식 결과(256 미만이면 잡 미배치), 4GB 1408 |
-| `rdkx3-02` | RDK X3 | worker(BPU 주력) + master 콜드 스탠바이 | cluster-agent, cluster-execd, tailscaled (master 계열은 설치 후 mask) | 3 / 2 / 1024 (4GB 2816) |
+| `rdkx3-01` | RDK X3 (4GB) | **master** + worker(축소) | cluster-master, cluster-telegram, cluster-ai, cluster-agent, cluster-execd, Caddy, tailscaled, chrony 서버 | 1 / 1 / 1408 |
+| `rdkx3-02` | RDK X3 | worker(BPU 주력) + master 콜드 스탠바이 | cluster-agent, cluster-execd, tailscaled (master 계열은 설치 후 mask) | 3 / 2 / 2816 |
 | `rpi3-01~03` | Raspberry Pi 3B (1GB) | worker(CPU) | cluster-agent, cluster-execd | 2 / 0 / 384 (잠정) |
 
 - **네트워크**: 기가비트 unmanaged 스위치, 전 노드 유선, DHCP 예약. agent는 물리 호스트가 아니라 VIP 이름 `master.cluster.internal`로 접속한다. 대역은 Phase 0에서 실제 값으로 치환(예시 `192.168.1.0/24`).
@@ -216,7 +218,7 @@ sequenceDiagram
 | Master · telegram · ai | Python 3.10+, FastAPI, Uvicorn 단일 worker, httpx | async WebSocket, UDS 클라이언트. anthropic SDK 1.x가 3.10 이상 요구. RDK 이미지가 3.8이면 독립 실행형 CPython 3.11(topology.md 5장) |
 | DB | SQLite (WAL) + SQLAlchemy/SQLModel | 별도 서버 불필요, 5대 규모에 충분 |
 | 텔레그램 | httpx로 Bot API 직접 호출(약 400줄) | 의존성 최소, 감사 가능, outbox 설계와 1:1 (telegram.md 3.2) |
-| AI | `anthropic` 1.x `AsyncAnthropic`, `client.beta.messages.tool_runner` + `@beta_async_tool`, 모델 `claude-opus-5-5`, `output_config.effort` 명시(기본 medium), `fallbacks="default"`, 자동 프롬프트 캐싱 | ai-agent.md 3장 |
+| AI | **Claude Code CLI print 모드**를 자식 프로세스로 구동(사용자 구독, `claude setup-token`), `--restricted --tools ""` + 우리 MCP 서버만, `--permission-mode dontAsk`, `--system-prompt-file`, `--max-turns`, `stream-json`. anthropic SDK 직접 호출은 설계로만 보존 | ai-agent.md 0장 |
 | Frontend | React + TypeScript + Vite, Tailwind CSS, uPlot(또는 Chart.js) | 빌드는 CI에서, 클러스터에 Node.js 없음, 외부 CDN 없음(CSP) |
 | 인증 | Argon2id(`argon2-cffi`), TOTP(RFC 6238), 서버측 세션 | security.md 5장 |
 | 프로세스·격리 | systemd (transient unit, cgroup v2, 하드닝 옵션, `LoadCredential`) | security.md 9·11장 |
@@ -401,14 +403,14 @@ collector 구조: `collectors/base.py`(인터페이스 `static_info()`, `collect
 
 | 항목 | 설계 |
 |---|---|
-| 해석 | "로컬 에이전트" = rdkx3-01에서 로컬로 도는 오케스트레이터(cluster-ai, RSS ≤150MB). 추론만 Claude API |
-| 모델 | `claude-opus-5-5`, `output_config.effort` 명시(기본 `medium`, 사용자가 `high` 선택 가능), thinking 파라미터 미전송(adaptive 상시), `tool_choice` auto, prefill 없음, `fallbacks="default"`, 툴은 `submit_job` 외 `strict: true`(길이·범위·개수 제약은 툴 함수·master가 검증), `stop_reason`이 `refusal`/`max_tokens`면 툴 실행 전에 중단 |
+| 해석 | "로컬 에이전트" = rdkx3-01에서 로컬로 도는 오케스트레이터(cluster-ai). 추론은 사용자의 Claude Code 구독으로, Claude Code CLI(print 모드) 자식 프로세스가 수행(ai-agent.md 0장) |
+| 모델 | CLI `--model`(기본 `opus` 별칭, 구독에서 선택 가능한 모델), `--effort`(기본 medium, 사용자가 high 선택 가능). 내장 툴 전부 제거(`--tools ""`, `--restricted`), 우리 MCP 툴만(`--strict-mcp-config`). 거부·한도 초과는 스트림의 `result`/`api_retry` 이벤트로 판정 |
 | 툴 | 전용 typed 툴만: 읽기(상태·노드·메트릭·경고·프리셋·명령 결과·잡), 자동 진단 프리셋, `ask_user`, `send_progress`, 변경(`run_preset`, `run_shell`(admin, `as_root` 필드 없음), `submit_job`, 취소), `propose_plan`. 승인·사용자·토큰·보안·감사·AI 정책·as_root·cordon·로컬 셸·HTTP fetch는 툴이 없음 |
 | 권한 | `ai-operator` = 요청 사용자의 **현재** 권한 ∩ AI 채널 규칙 ∩ `ai_policy`. AI는 승인을 결정할 수 없음 |
 | 승인 | 변경은 단건 승인(payload 해시 바인딩, 10분), 사람이 승인하면 master가 실행. 계획 승인(v3)은 medium 이하·비코드 단계만 묶음(최대 30분) |
 | 인젝션 | 툴 결과의 untrusted 문자열은 랜덤 id 경계로 감싸고 제어·bidi 문자 제거. **실제 방어는 승인·권한·노드 정책** |
 | 데이터 | Claude API로 가는 모든 문자열은 `redact` 마스킹 + 크기 상한(노드당 100줄/8KB, 툴 결과 16KB) |
-| 비용 | 권고형 `task_budget` + 하네스 강제 상한(반복·툴 수·2시간·태스크 $1/$2·일 $5·월 $50, 호출 전 예측 차단) + Anthropic 콘솔 지출 한도. 캐싱: 고정 툴·시스템 프롬프트, 가변 정보는 messages |
+| 사용량 | 구독 한도를 사용자의 대화형 사용과 나눠 쓴다 → 태스크당 `--max-turns`·토큰 상한, 하루 태스크 수 상한, quiet hours, `rate_limit` 시 큐 일시정지 + 텔레그램 알림. 달러 상한·단가표 없음 |
 | 단계 | AI v1(읽기 전용) = Phase 9, AI v2(변경 + 단건 승인) = Phase 11, AI v3(계획 승인 + 잡) = Phase 12 |
 
 ---
@@ -747,11 +749,13 @@ flowchart LR
 
 ## 21. 남은 결정 사항 (사용자에게 확인할 것)
 
-### 21.1 사용자 결정이 필요한 것
+### 21.1 사용자 결정 기록
 
-| # | 분야 | 질문 | 현재 기본값 (확인 전까지 이대로 진행) |
+2026-10-07에 사용자가 **Q1은 4GB, 그 밖(Q2~Q19)은 아래 기본값대로** 확정했다. 단 Q17(AI 비용)은 "Claude Code 구독 토큰 사용"으로 전제가 바뀌었다(21.2). 이 표는 결정 근거 기록용이며, 기본값을 바꾸고 싶으면 해당 설계 문서를 고치고 여기에 적는다.
+
+| # | 분야 | 질문 | 확정값 |
 |---|---|---|---|
-| Q1 | 하드웨어 | RDK X3 두 대의 RAM(2GB/4GB)과 RDK OS 이미지·커널 버전 | 2GB 가정. 4GB면 rdkx3-01도 잡을 더 받음. 이미지는 22.04 계열 |
+| Q1 | 하드웨어 | RDK X3 두 대의 RAM과 RDK OS 이미지·커널 버전 | **4GB로 확정(2026-10-07)**. 이미지·커널 버전은 Phase 0에서 기록 |
 | Q2 | 네트워크 | 가정 LAN 대역, 공유기 DHCP 풀 범위, 풀 밖 예약 지원 여부, 관리 PC 고정 IP | `192.168.1.0/24`, 풀 `.100~.199`, VIP `.200` |
 | Q3 | 하드웨어 | 스위치 신규 구입 여부(VLAN 원하면 managed 필요), rdkx3-01용 USB SSD 유무, 전원 어댑터 구성(RDK X3 규격, Pi 개별 어댑터 vs 멀티포트) | unmanaged 8포트, SSD 있으면 DB를 SSD에 |
 | Q4 | 외부 접속 | 접속할 모든 기기에 Tailscale 앱 설치 + IdP 계정 MFA를 받아들일 수 있는지(아니면 Cloudflare Tunnel + Access: 도메인 필요, Cloudflare가 평문을 봄) | Tailscale |
@@ -767,11 +771,14 @@ flowchart LR
 | Q14 | 텔레그램 | 마스킹된 출력 파일을 직접 요청할 때만 받는 opt-in 옵션이 필요한지 | 없음 (출력은 꼬리 N줄 + 웹) |
 | Q15 | 텔레그램 | `/lockdown`의 확인 버튼 1회 유지 vs 즉시 발동 | 확인 1회 |
 | Q16 | 텔레그램 | 시간대 Asia/Seoul, 방해 금지(v2) 기본값, 일일 요약(기본 off, 09:00), 계정 1:1 연결 제한 | 표기대로 |
-| Q17 | AI | 비용 상한(태스크 $1/high $2, 하루 $5, 한 달 $50). 하루 medium 10건이면 월 약 $69~87로 월 상한보다 높음 | 표기대로, 실사용 보고 조정 |
+| Q17 | AI | 비용 상한 | **전제 변경**: 모델 사용량을 API 키가 아니라 사용자의 Claude Code 구독으로 처리하기로 함. 달러 상한 대신 구독 한도 안의 사용량(턴·토큰) 상한으로 바꾼다. 가능 여부·방식은 21.2와 [ai-agent.md](./design/ai-agent.md) 0장 |
 | Q18 | AI | `/cancel`의 기본 동작이 그 태스크가 시작한 실행 중 명령·잡까지 취소하는 것으로 맞는지(웹에는 "AI만 중단" 옵션) | 전부 취소 |
 | Q19 | AI | Anthropic 계정·조직 설정에서 API 데이터 보존·학습 사용 정책을 확인하고 받아들일 수 있는지 | 확인 필요 |
 
 ### 21.2 이 통합에서 결정한 것 (재확인 불필요)
+
+- **RDK X3 RAM 4GB** (D7, 2026-10-07): rdkx3-01 `job_mem_mb` 1408, rdkx3-02 2816 (topology.md 1.2·6장). agent의 기본 용량 제안값도 같은 수치로 맞춘다.
+- **AI 모델 사용량은 Claude Code 구독으로** (R4, 2026-10-07): 사용자가 API 키 과금 대신 자기 Claude Code 구독 토큰을 쓰기로 했다. 공식 문서로 가능 여부와 조건을 확인한 뒤 [ai-agent.md](./design/ai-agent.md) 0장에 결정과 영향(실행 방식, 툴 제한, 승인 게이트, 사용량 상한)을 적는다. security.md 15장의 보안 경계는 그대로 유효하다.
 
 - 계획 승인 TTL 30분: 묶을 수 있는 단계를 medium 이하·비코드로 제한하는 대신 security.md 7.5-3 예외로 허용.
 - 같은 `cluster-run` Task끼리의 파일 접근: `TemporaryFileSystem` + `BindPaths`로 자기 디렉터리만 보이게 하고(Phase 1 동작 확인), 프로세스 간 시그널은 v1 수용 위험.
