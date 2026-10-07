@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -95,7 +96,7 @@ class NodeRecord:
 
 
 def validate_node_id(node_id: Any) -> str:
-    if not isinstance(node_id, str) or not NODE_ID.match(node_id):
+    if not isinstance(node_id, str) or not NODE_ID.fullmatch(node_id):
         raise NodeError("node id must match ^[a-z0-9][a-z0-9-]{0,62}$")
     return node_id
 
@@ -105,11 +106,9 @@ def validate_labels(labels: Any) -> dict[str, Any]:
         return {}
     if not isinstance(labels, dict) or len(labels) > MAX_LABELS:
         raise NodeError(f"labels must be an object with at most {MAX_LABELS} keys")
-    import re
-
     out: dict[str, Any] = {}
     for key, value in labels.items():
-        if not isinstance(key, str) or not re.match(LABEL_KEY, key):
+        if not isinstance(key, str) or not re.fullmatch(LABEL_KEY, key):
             raise NodeError(f"bad label key {key!r}")
         if isinstance(value, bool) or (isinstance(value, str) and len(value) <= 64):
             out[key] = value
@@ -336,7 +335,7 @@ class NodeRegistry:
         The hash is read from the database on every attempt so that a revocation from the CLI
         takes effect immediately, even if the master's cache is stale.
         """
-        if not isinstance(node_id, str) or not NODE_ID.match(node_id):
+        if not isinstance(node_id, str) or not NODE_ID.fullmatch(node_id):
             token_matches(token if is_token(token, NODE_PREFIX) else "cat_" + "B" * 43, _DUMMY_HASH)
             return False
         row = await self.db.run(

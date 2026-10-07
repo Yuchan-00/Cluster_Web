@@ -110,8 +110,11 @@ def node_token() -> Any:
     401 denial response and the 44xx close codes)."""
     req = Requirement(node=True)
 
-    async def dependency() -> None:
-        return None
+    async def dependency(conn: HTTPConnection) -> None:
+        # The marker is only meaningful where the hub does the check; anywhere else it would
+        # be an unauthenticated route wearing a badge.
+        if conn.scope["type"] != "websocket" or getattr(conn.app.state, "listener", "") != "agent":
+            raise HTTPException(status_code=500, detail="node_token() used outside the agent hub")
 
     dependency._cluster_requirement = req  # type: ignore[attr-defined]
     return Depends(dependency)

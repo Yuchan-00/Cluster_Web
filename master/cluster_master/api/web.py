@@ -65,7 +65,7 @@ async def get_node(
 async def node_metrics(
     node_id: str,
     request: Request,
-    since: float | None = Query(default=None, ge=0),
+    since: float | None = Query(default=None, ge=0, le=1 << 40),
     limit: int = Query(default=720, ge=1, le=10000),
     history: bool = False,
     _: Principal = require("viewer"),
@@ -86,7 +86,7 @@ async def list_alerts(
     request: Request,
     open: bool = False,
     limit: int = Query(default=100, ge=1, le=1000),
-    before: int | None = Query(default=None, ge=1),
+    before: int | None = Query(default=None, ge=1, le=1 << 62),
     _: Principal = require("viewer"),
 ) -> list[dict[str, Any]]:
     return await state_of(request).alerts.list(open_only=open, limit=limit, before_id=before)
@@ -105,7 +105,7 @@ async def system_status(request: Request, _: Principal = require("viewer")) -> d
 async def audit_tail(
     request: Request,
     limit: int = Query(default=100, ge=1, le=1000),
-    before: int | None = Query(default=None, ge=1),
+    before: int | None = Query(default=None, ge=1, le=1 << 62),
     _: Principal = require("admin"),
 ) -> list[dict[str, Any]]:
     return await state_of(request).audit.tail(limit=limit, before_id=before)
@@ -121,7 +121,7 @@ async def audit_verify(request: Request, _: Principal = require("admin")) -> dic
 
 
 class NodeCreate(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", strict=True)  # no bool->int or "2"->2 coercion
     id: str = Field(min_length=1, max_length=63)
     board: str
     labels: dict[str, Any] | None = None
@@ -129,7 +129,7 @@ class NodeCreate(BaseModel):
 
 
 class NodePatch(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", strict=True)
     labels: dict[str, Any] | None = None
     capacity: dict[str, int] | None = None
     sched_state: str | None = None
@@ -165,6 +165,10 @@ async def patch_node(
 ) -> dict[str, Any]:
     st = state_of(request)
     _node_or_404(st, node_id)
+    if body.sched_reason is not None and body.sched_state is None:
+        raise HTTPException(status_code=422, detail="sched_reason requires sched_state")
+    if body.labels is None and body.capacity is None and body.sched_state is None:
+        raise HTTPException(status_code=422, detail="nothing to change")
     try:
         await st.nodes.update(
             node_id,
@@ -211,7 +215,7 @@ async def delete_node(
     st = state_of(request)
     _node_or_404(st, node_id)
     await st.nodes.remove(node_id, actor=principal.audit_actor(), ip=client_ip(request))
-    st.metrics.forget(node_id)
+    await st.metrics.forget_db(node_id)
     await st.alerts.resolve_node(node_id)
     return None
 
@@ -220,7 +224,7 @@ async def delete_node(
 
 
 class LockdownBody(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", strict=True)
     active: bool
     reason: str | None = Field(default=None, max_length=200)
 

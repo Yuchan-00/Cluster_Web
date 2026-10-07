@@ -13,6 +13,7 @@ import http.client
 import json
 import os
 import socket
+import sqlite3
 import sys
 from collections.abc import Sequence
 from typing import Any
@@ -25,7 +26,9 @@ from .auth.resolvers import ServiceTokens
 from .config import DEFAULT_PATH, ConfigError, MasterConfig, load_config
 from .db import Database, SyncDB
 from .events import EventBus
+from .services.alerts import AlertService
 from .services.lockdown import LockdownService
+from .services.metrics_store import MetricsStore
 from .services.nodes import NodeError, NodeRegistry
 
 ACTOR = ("cli", os.environ.get("SUDO_USER") or os.environ.get("USER") or "root", "cli")
@@ -55,6 +58,8 @@ class AdminSocket:
         self.path = path
 
     def available(self) -> bool:
+        """True if the master answers on the admin socket. A socket we may not open means a
+        master IS running and we are not root: refuse rather than silently edit its database."""
         if not os.path.exists(self.path):
             return False
         try:
@@ -62,8 +67,15 @@ class AdminSocket:
             conn.connect()
             conn.close()
             return True
-        except OSError:
-            return False
+        except PermissionError as exc:
+            raise CliError(
+                f"{self.path} exists but is not accessible ({exc.strerror}); "
+                "run cluster-master-admin as root"
+            ) from None
+        except (FileNotFoundError, ConnectionRefusedError):
+            return False  # stale socket file: the master is not running
+        except OSError as exc:
+            raise CliError(f"admin socket {self.path}: {exc}") from exc
 
     def call(self, method: str, path: str, body: dict[str, Any] | None = None) -> Any:
         conn = _UdsConnection(self.path)
@@ -96,8 +108,11 @@ class AdminSocket:
 
 
 class Offline:
-    def __init__(self, cfg: MasterConfig) -> None:
+    def __init__(self, cfg: MasterConfig, *, create: bool) -> None:
+        self.cfg = cfg
         if not os.path.exists(cfg.db_path):
+            if not create:
+                raise CliError(f"no database at {cfg.db_path} (the master has never run here)")
             print(f"note: creating {cfg.db_path}", file=sys.stderr)
         self.db = Database(cfg.db_path)
         self.audit = AuditLog(self.db, default_redactor)
@@ -105,6 +120,8 @@ class Offline:
         self.nodes = NodeRegistry(self.db, self.audit, self.bus)
         self.tokens = ServiceTokens(self.db, self.audit)
         self.lockdown = LockdownService(self.db, self.audit, self.bus)
+        self.alerts = AlertService(self.db, self.bus)
+        self.metrics = MetricsStore(self.db)
 
     async def start(self) -> None:
         await self.db.migrate()
@@ -113,6 +130,27 @@ class Offline:
 
     async def close(self) -> None:
         await self.db.close()
+        _fix_owner(self.cfg)
+
+
+def _fix_owner(cfg: MasterConfig) -> None:
+    """Root created or touched the database: give it to the data_dir's owner (the service user)
+    so the master can open it at its next start."""
+    if os.geteuid() != 0:
+        return
+    try:
+        st = os.stat(cfg.data_dir)
+    except OSError:
+        return
+    if st.st_uid == 0:
+        return
+    for suffix in ("", "-wal", "-shm"):
+        path = cfg.db_path + suffix
+        try:
+            if os.path.exists(path):
+                os.chown(path, st.st_uid, st.st_gid)
+        except OSError as exc:  # pragma: no cover - permissions already root here
+            print(f"warning: cannot chown {path}: {exc}", file=sys.stderr)
 
 
 def _run(coro: Any) -> Any:
@@ -146,15 +184,46 @@ def _capacity(args: argparse.Namespace) -> dict[str, int] | None:
     return cap or None
 
 
-def _emit_token(token: str, token_file: str | None, as_json: bool, extra: dict[str, Any]) -> None:
-    if token_file:
-        fd = os.open(token_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-        with os.fdopen(fd, "w", encoding="ascii") as f:
+class TokenSink:
+    """Where a new token goes. The file is created (0600, O_EXCL) BEFORE the token exists in
+    the database, so a path that cannot be written never costs a rotated node its token."""
+
+    def __init__(self, token_file: str | None) -> None:
+        self.path = token_file
+        self.fd: int | None = None
+        if token_file:
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+            try:
+                self.fd = os.open(token_file, flags, 0o600)
+            except FileExistsError:
+                raise CliError(
+                    f"{token_file} already exists; not overwriting a token file"
+                ) from None
+            except OSError as exc:
+                raise CliError(f"cannot create {token_file}: {exc}") from exc
+
+    def abandon(self) -> None:
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+            if self.path:
+                try:
+                    os.unlink(self.path)
+                except OSError:
+                    pass
+
+
+def _emit_token(token: str, sink: TokenSink, as_json: bool, extra: dict[str, Any]) -> None:
+    if sink.fd is not None:
+        with os.fdopen(sink.fd, "w", encoding="ascii") as f:
             f.write(token + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        sink.fd = None
         if as_json:
-            print(json.dumps(dict(extra, token_file=token_file)))
+            print(json.dumps(dict(extra, token_file=sink.path)))
         else:
-            print(f"token written to {token_file} (mode 0600). It is not stored anywhere else.")
+            print(f"token written to {sink.path} (mode 0600). It is not stored anywhere else.")
     elif as_json:
         print(json.dumps(dict(extra, token=token)))
     else:
@@ -166,7 +235,7 @@ def cmd_status(ctx: Ctx, args: argparse.Namespace) -> int:
     if ctx.sock is not None:
         _print(ctx.sock.call("GET", "/internal/admin/status"), args)
         return 0
-    off = ctx.offline()
+    off = ctx.offline(create=False)
 
     async def _go() -> dict[str, Any]:
         await off.start()
@@ -190,7 +259,7 @@ def cmd_node_list(ctx: Ctx, args: argparse.Namespace) -> int:
     if ctx.sock is not None:
         views = ctx.sock.call("GET", "/internal/admin/nodes")
     else:
-        off = ctx.offline()
+        off = ctx.offline(create=False)
 
         async def _go() -> list[dict[str, Any]]:
             await off.start()
@@ -223,18 +292,31 @@ def cmd_node_register(ctx: Ctx, args: argparse.Namespace) -> int:
         "labels": _labels(args.label),
         "capacity": _capacity(args),
     }
+    sink = TokenSink(args.token_file)
+    try:
+        view, token = _register(ctx, body)
+    except BaseException:
+        sink.abandon()
+        raise
+    if not args.json:
+        print(f"registered {view['id']} ({view['board']}) labels={json.dumps(view['labels'])}")
+    _emit_token(token, sink, args.json, {"id": view["id"]})
+    return 0
+
+
+def _register(ctx: Ctx, body: dict[str, Any]) -> tuple[dict[str, Any], str]:
     if ctx.sock is not None:
         view = ctx.sock.call("POST", "/internal/admin/nodes", body)
         token = view.pop("token")
     else:
-        off = ctx.offline()
+        off = ctx.offline(create=True)
 
         async def _go() -> tuple[dict[str, Any], str]:
             await off.start()
             try:
                 record, token = await off.nodes.register(
-                    args.name,
-                    args.board,
+                    body["id"],
+                    body["board"],
                     labels=body["labels"],
                     capacity=body["capacity"],
                     actor=ACTOR,
@@ -244,27 +326,29 @@ def cmd_node_register(ctx: Ctx, args: argparse.Namespace) -> int:
                 await off.close()
 
         view, token = _run(_go())
-    if not args.json:
-        print(f"registered {view['id']} ({view['board']}) labels={json.dumps(view['labels'])}")
-    _emit_token(token, args.token_file, args.json, {"id": view["id"]})
-    return 0
+    return view, token
 
 
 def cmd_node_rotate(ctx: Ctx, args: argparse.Namespace) -> int:
-    if ctx.sock is not None:
-        token = ctx.sock.call("POST", f"/internal/admin/nodes/{args.name}/token")["token"]
-    else:
-        off = ctx.offline()
+    sink = TokenSink(args.token_file)
+    try:
+        if ctx.sock is not None:
+            token = ctx.sock.call("POST", f"/internal/admin/nodes/{args.name}/token")["token"]
+        else:
+            off = ctx.offline(create=False)
 
-        async def _go() -> str:
-            await off.start()
-            try:
-                return await off.nodes.rotate_token(args.name, actor=ACTOR)
-            finally:
-                await off.close()
+            async def _go() -> str:
+                await off.start()
+                try:
+                    return await off.nodes.rotate_token(args.name, actor=ACTOR)
+                finally:
+                    await off.close()
 
-        token = _run(_go())
-    _emit_token(token, args.token_file, args.json, {"id": args.name})
+            token = _run(_go())
+    except BaseException:
+        sink.abandon()
+        raise
+    _emit_token(token, sink, args.json, {"id": args.name})
     return 0
 
 
@@ -272,7 +356,7 @@ def cmd_node_revoke(ctx: Ctx, args: argparse.Namespace) -> int:
     if ctx.sock is not None:
         ctx.sock.call("DELETE", f"/internal/admin/nodes/{args.name}/token")
     else:
-        off = ctx.offline()
+        off = ctx.offline(create=False)
 
         async def _go() -> None:
             await off.start()
@@ -290,12 +374,14 @@ def cmd_node_remove(ctx: Ctx, args: argparse.Namespace) -> int:
     if ctx.sock is not None:
         ctx.sock.call("DELETE", f"/internal/admin/nodes/{args.name}")
     else:
-        off = ctx.offline()
+        off = ctx.offline(create=False)
 
         async def _go() -> None:
             await off.start()
             try:
                 await off.nodes.remove(args.name, actor=ACTOR)
+                await off.alerts.resolve_node(args.name)
+                await off.metrics.forget_db(args.name)
             finally:
                 await off.close()
 
@@ -319,7 +405,7 @@ def cmd_node_set(ctx: Ctx, args: argparse.Namespace) -> int:
     if ctx.sock is not None:
         view = ctx.sock.call("PATCH", f"/internal/admin/nodes/{args.name}", body)
     else:
-        off = ctx.offline()
+        off = ctx.offline(create=False)
 
         async def _go() -> dict[str, Any]:
             await off.start()
@@ -343,23 +429,28 @@ def cmd_node_set(ctx: Ctx, args: argparse.Namespace) -> int:
 
 def cmd_token_create(ctx: Ctx, args: argparse.Namespace) -> int:
     body = {"principal": args.principal, "scopes": args.scope}
-    if ctx.sock is not None:
-        row = ctx.sock.call("POST", "/internal/admin/service-tokens", body)
-        token = row.pop("token")
-    else:
-        off = ctx.offline()
+    sink = TokenSink(args.token_file)
+    try:
+        if ctx.sock is not None:
+            row = ctx.sock.call("POST", "/internal/admin/service-tokens", body)
+            token = row.pop("token")
+        else:
+            off = ctx.offline(create=True)
 
-        async def _go() -> tuple[dict[str, Any], str]:
-            await off.start()
-            try:
-                return await off.tokens.create(args.principal, args.scope, actor=ACTOR)
-            finally:
-                await off.close()
+            async def _go() -> tuple[dict[str, Any], str]:
+                await off.start()
+                try:
+                    return await off.tokens.create(args.principal, args.scope, actor=ACTOR)
+                finally:
+                    await off.close()
 
-        row, token = _run(_go())
+            row, token = _run(_go())
+    except BaseException:
+        sink.abandon()
+        raise
     if not args.json:
         print(f"service token #{row['id']} for {row['principal']} scopes={row['scopes']}")
-    _emit_token(token, args.token_file, args.json, {"id": row["id"]})
+    _emit_token(token, sink, args.json, {"id": row["id"]})
     return 0
 
 
@@ -367,7 +458,7 @@ def cmd_token_list(ctx: Ctx, args: argparse.Namespace) -> int:
     if ctx.sock is not None:
         rows = ctx.sock.call("GET", "/internal/admin/service-tokens")
     else:
-        off = ctx.offline()
+        off = ctx.offline(create=False)
 
         async def _go() -> list[dict[str, Any]]:
             await off.start()
@@ -385,7 +476,7 @@ def cmd_token_revoke(ctx: Ctx, args: argparse.Namespace) -> int:
     if ctx.sock is not None:
         ctx.sock.call("DELETE", f"/internal/admin/service-tokens/{args.id}")
     else:
-        off = ctx.offline()
+        off = ctx.offline(create=False)
 
         async def _go() -> bool:
             await off.start()
@@ -406,7 +497,7 @@ def cmd_lockdown(ctx: Ctx, args: argparse.Namespace) -> int:
     if ctx.sock is not None:
         view = ctx.sock.call("POST", "/internal/admin/lockdown", body)
     else:
-        off = ctx.offline()
+        off = ctx.offline(create=True)
 
         async def _go() -> dict[str, Any]:
             await off.start()
@@ -428,7 +519,7 @@ def cmd_audit_verify(ctx: Ctx, args: argparse.Namespace) -> int:
     if ctx.sock is not None:
         result = ctx.sock.call("GET", "/internal/admin/audit/verify")
     else:
-        db = SyncDB(ctx.cfg.db_path, read_only=True)
+        db = _open_readonly(ctx.cfg)
         try:
             result = verify_sync(db).__dict__
         finally:
@@ -441,7 +532,7 @@ def cmd_audit_tail(ctx: Ctx, args: argparse.Namespace) -> int:
     if ctx.sock is not None:
         rows = ctx.sock.call("GET", f"/internal/admin/audit/tail?limit={args.n}")
     else:
-        db = SyncDB(ctx.cfg.db_path, read_only=True)
+        db = _open_readonly(ctx.cfg)
         try:
             rows = [
                 dict(r)
@@ -465,6 +556,12 @@ def cmd_config_check(ctx: Ctx, args: argparse.Namespace) -> int:
     return 0
 
 
+def _open_readonly(cfg: MasterConfig) -> SyncDB:
+    if not os.path.exists(cfg.db_path):
+        raise CliError(f"no database at {cfg.db_path}")
+    return SyncDB(cfg.db_path, read_only=True)
+
+
 def _print(obj: Any, args: argparse.Namespace) -> None:
     print(json.dumps(obj, indent=None if getattr(args, "json", False) else 2, sort_keys=True))
 
@@ -477,9 +574,9 @@ class Ctx:
         self.cfg = cfg
         self.sock = sock
 
-    def offline(self) -> Offline:
+    def offline(self, *, create: bool) -> Offline:
         print("master not running: operating on the database directly", file=sys.stderr)
-        return Offline(self.cfg)
+        return Offline(self.cfg, create=create)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -564,13 +661,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         sock = AdminSocket(cfg.listeners.admin.path)
         ctx = Ctx(cfg, sock if sock.available() else None)
         return args.fn(ctx, args)
-    except (CliError, ConfigError, NodeError, ValueError) as exc:
+    except (CliError, ConfigError, NodeError, ValueError, sqlite3.Error) as exc:
         print(f"error: {exc}", file=sys.stderr)
-        return 1
-    except FileExistsError as exc:
-        print(
-            f"error: {exc.filename} already exists; not overwriting a token file", file=sys.stderr
-        )
         return 1
 
 

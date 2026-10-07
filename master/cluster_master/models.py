@@ -1,9 +1,11 @@
-"""Agent protocol messages as strict pydantic models (docs/PLAN.md 12.1, security.md 8.3).
+"""Agent protocol messages as strict pydantic models (docs/protocol.md, security.md 8.3).
 
 Everything the agent sends is validated here before any service sees it. Unknown top-level
 fields are rejected (a typo in the agent is a bug, not something to guess at); the free-form
 blocks (`static_info`, `data`) are size- and shape-limited instead because board collectors
-add keys over time.
+add keys over time. Every parsed object is cleaned first: no NaN/Infinity, no non-string keys,
+bounded nesting, and lone UTF-16 surrogates (which `\\udXXX` JSON escapes can smuggle in)
+replaced so that everything downstream is valid UTF-8.
 """
 
 from __future__ import annotations
@@ -30,6 +32,11 @@ RESULT_STATUSES = (
     "rejected",
     "failed_to_start",
 )
+# What cluster-execd accepts (execd/cluster_execd/request.py); anything else is rejected there.
+EXEC_LIMIT_KEYS = frozenset({"memory_mb", "cpu_pct", "tasks", "timeout_s"})
+ENV_KEY = re.compile(r"^CW_[A-Z0-9_]{1,60}$")
+MAX_DEPTH = 32
+REASON_MAX = 512
 
 NodeId = Annotated[str, Field(pattern=NODE_ID.pattern)]
 RunId = Annotated[str, Field(pattern=RUN_ID.pattern)]
@@ -52,25 +59,51 @@ def json_size(value: Any) -> int:
     return len(json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
 
 
-def _finite_numbers(value: Any, where: str) -> None:
-    """NaN/Infinity are valid for Python's json but not for JSON; refuse them everywhere."""
-    if isinstance(value, float) and not math.isfinite(value):
-        raise ValueError(f"{where}: non-finite number")
+def safe_text(text: str, limit: int = 200) -> str:
+    """Agent-controlled text made safe for a log line: one line, printable, bounded."""
+    out = "".join(ch if ch.isprintable() else "�" for ch in text)
+    return out if len(out) <= limit else out[: limit - 3] + "..."
+
+
+def _clean_str(s: str) -> str:
+    try:
+        s.encode("utf-8")
+        return s
+    except UnicodeEncodeError:
+        return s.encode("utf-16", "surrogatepass").decode("utf-16", "replace")
+
+
+def clean(value: Any, depth: int = 0) -> Any:
+    """Reject what JSON cannot carry and repair what Python's json lets through."""
+    if depth > MAX_DEPTH:
+        raise ValueError("message nested too deeply")
+    if isinstance(value, str):
+        return _clean_str(value)
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("non-finite number")
+        return value
     if isinstance(value, dict):
+        out = {}
         for k, v in value.items():
             if not isinstance(k, str):
-                raise ValueError(f"{where}: non-string key")
-            _finite_numbers(v, where)
-    elif isinstance(value, list):
-        for v in value:
-            _finite_numbers(v, where)
+                raise ValueError("non-string key")
+            out[_clean_str(k)] = clean(v, depth + 1)
+        return out
+    if isinstance(value, list):
+        return [clean(v, depth + 1) for v in value]
+    return value
+
+
+Board = Annotated[str, Field(pattern=r"^[a-z0-9_-]{1,32}$")]
+AgentVersion = Annotated[str, Field(pattern=r"^[\x21-\x7e]{1,64}$")]
 
 
 class Hello(_Strict):
     type: Literal["hello"]
     node_id: NodeId
-    board: str = Field(min_length=1, max_length=32)
-    agent_version: str = Field(min_length=1, max_length=64)
+    board: Board
+    agent_version: AgentVersion
     static_info: dict[str, Any] = Field(default_factory=dict)
     running_tasks: list[Any] = Field(default_factory=list, max_length=256)
     unacked_results: list[Any] = Field(default_factory=list, max_length=256)
@@ -78,19 +111,15 @@ class Hello(_Strict):
     running_commands: list[RunId] = Field(default_factory=list, max_length=256)
     pending_results: list[RunId] = Field(default_factory=list, max_length=256)
 
-    @field_validator("static_info")
-    @classmethod
-    def _check_static(cls, v: dict[str, Any]) -> dict[str, Any]:
-        _finite_numbers(v, "static_info")
-        return v
-
 
 class Sched(_Strict):
-    free_slots: int = Field(ge=0, le=64)
-    free_bpu_slots: int = Field(ge=0, le=64)
-    job_mem_free_mb: int = Field(ge=0, le=1 << 20)
-    running: list[Any] = Field(default_factory=list, max_length=256)
-    cached_bundles: list[Any] = Field(default_factory=list, max_length=1024)
+    """Scheduler view (Phase 7). Stored and shown, not yet acted on; bounds are sanity only."""
+
+    free_slots: int = Field(ge=0, le=1 << 20)
+    free_bpu_slots: int = Field(ge=0, le=1 << 20)
+    job_mem_free_mb: int = Field(ge=0, le=1 << 31)
+    running: list[Any] = Field(default_factory=list, max_length=64)
+    cached_bundles: list[Any] = Field(default_factory=list, max_length=256)
 
 
 class Metrics(_Strict):
@@ -102,14 +131,13 @@ class Metrics(_Strict):
     @field_validator("ts")
     @classmethod
     def _check_ts(cls, v: float | int) -> float | int:
-        if isinstance(v, bool) or not math.isfinite(v) or v <= 0:
+        if isinstance(v, bool) or not math.isfinite(v) or v <= 0 or v > 1 << 40:
             raise ValueError("ts must be a positive epoch time")
         return v
 
     @field_validator("data")
     @classmethod
     def _check_data(cls, v: dict[str, Any]) -> dict[str, Any]:
-        _finite_numbers(v, "data")
         extra = v.get("extra")
         if extra is not None and not isinstance(extra, dict):
             raise ValueError("data.extra must be an object")
@@ -149,12 +177,20 @@ class CmdResult(_Strict):
     type: Literal["cmd_result"]
     run_id: RunId
     status: Literal[RESULT_STATUSES]  # type: ignore[valid-type]
-    exit_code: int | None = None
-    duration_ms: int | None = Field(default=None, ge=0)
-    output_bytes: int | None = Field(default=None, ge=0)
+    exit_code: int | None = Field(default=None, ge=-(1 << 31), le=1 << 31)
+    duration_ms: int | None = Field(default=None, ge=0, le=1 << 53)
+    output_bytes: int | None = Field(default=None, ge=0, le=1 << 53)
     truncated: bool | None = None
-    reason: str | None = Field(default=None, max_length=512)
-    dropped_bytes: int | None = Field(default=None, ge=0)
+    reason: str | None = None
+    dropped_bytes: int | None = Field(default=None, ge=0, le=1 << 53)
+
+    @field_validator("reason", mode="before")
+    @classmethod
+    def _cut_reason(cls, v: Any) -> Any:
+        # a long reason is still a result; keep the head rather than refuse the message
+        if isinstance(v, str) and len(v) > REASON_MAX:
+            return v[: REASON_MAX - 3] + "..."
+        return v
 
 
 class Pong(_Strict):
@@ -174,10 +210,7 @@ def parse_hello(raw: str | bytes) -> Hello:
     obj = _load(raw)
     if obj.get("type") != "hello":
         raise ProtocolError("first message must be hello", close_code=1008)
-    try:
-        return Hello.model_validate(obj)
-    except ValidationError as exc:
-        raise ProtocolError(f"invalid hello: {_short(exc)}", close_code=1008) from None
+    return _validate(Hello, obj, "hello")  # type: ignore[return-value]
 
 
 def parse_agent_message(raw: str | bytes) -> AgentMessage:
@@ -185,11 +218,17 @@ def parse_agent_message(raw: str | bytes) -> AgentMessage:
     kind = obj.get("type")
     model = _BY_TYPE.get(kind) if isinstance(kind, str) else None
     if model is None:
-        raise ProtocolError(f"unknown message type {kind!r}", close_code=1008)
+        raise ProtocolError(f"unknown message type {safe_text(repr(kind), 60)}", close_code=1008)
+    return _validate(model, obj, kind)  # type: ignore[return-value]
+
+
+def _validate(model: type[BaseModel], obj: dict[str, Any], kind: str) -> BaseModel:
     try:
-        return model.model_validate(obj)  # type: ignore[return-value]
+        return model.model_validate(obj)
     except ValidationError as exc:
         raise ProtocolError(f"invalid {kind}: {_short(exc)}", close_code=1008) from None
+    except (ValueError, TypeError, OverflowError, RecursionError) as exc:
+        raise ProtocolError(f"invalid {kind}: {safe_text(str(exc), 80)}", close_code=1008) from None
 
 
 def _load(raw: str | bytes) -> dict[str, Any]:
@@ -197,11 +236,14 @@ def _load(raw: str | bytes) -> dict[str, Any]:
         raise ProtocolError("binary frames are not part of the protocol", close_code=1003)
     try:
         obj = json.loads(raw)
-    except ValueError:
+    except (ValueError, RecursionError):
         raise ProtocolError("invalid JSON", close_code=1007) from None
     if not isinstance(obj, dict):
         raise ProtocolError("message must be a JSON object", close_code=1008)
-    return obj
+    try:
+        return clean(obj)
+    except (ValueError, RecursionError) as exc:
+        raise ProtocolError(f"invalid message: {exc}", close_code=1008) from None
 
 
 def _short(exc: ValidationError) -> str:
@@ -210,7 +252,7 @@ def _short(exc: ValidationError) -> str:
         return "validation failed"
     e = errs[0]
     loc = ".".join(str(p) for p in e.get("loc", ()))
-    return f"{loc}: {e.get('msg')}"
+    return safe_text(f"{loc}: {e.get('msg')}", 160)
 
 
 def _get(d: dict[str, Any], *path: str) -> Any:
@@ -230,7 +272,7 @@ def _num(v: Any) -> float | None:
     return float(v)
 
 
-# -- messages to the agent (PLAN.md 12.1) --------------------------------------------------
+# -- messages to the agent (docs/protocol.md 4) ----------------------------------------------
 
 
 def welcome(
@@ -257,14 +299,41 @@ class ExecSpec(_Strict):
     run_id: RunId
     mode: Literal["shell", "preset"] = "shell"
     command: str | None = Field(default=None, max_length=64 * 1024)
-    argv: list[str] | None = Field(default=None, max_length=256)
-    root_op: str | None = Field(default=None, max_length=64)
+    argv: list[Annotated[str, Field(max_length=4096)]] | None = Field(default=None, max_length=256)
+    root_op: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_-]{0,63}$")
     params: dict[str, Any] | None = None
     as_root: bool = False
     timeout: int = Field(default=600, ge=1, le=24 * 3600)
-    limits: dict[str, Any] | None = None
+    limits: dict[str, int] | None = None
     network: Literal["none", "lan", "internet"] = "internet"
     env: dict[str, str] | None = None
+
+    @field_validator("limits")
+    @classmethod
+    def _check_limits(cls, v: dict[str, int] | None) -> dict[str, int] | None:
+        if v is None:
+            return None
+        bad = sorted(set(v) - EXEC_LIMIT_KEYS)
+        if bad:
+            raise ValueError(f"unknown limits key(s): {', '.join(bad)}")
+        for key, value in v.items():
+            if isinstance(value, bool) or not 0 <= value <= 1 << 31:
+                raise ValueError(f"limits.{key} out of range")
+        return v
+
+    @field_validator("env")
+    @classmethod
+    def _check_env(cls, v: dict[str, str] | None) -> dict[str, str] | None:
+        if v is None:
+            return None
+        if len(v) > 32:
+            raise ValueError("too many env entries")
+        for key, value in v.items():
+            if not ENV_KEY.fullmatch(key):
+                raise ValueError(f"env key {key!r} must match CW_[A-Z0-9_]+")
+            if len(value) > 4096:
+                raise ValueError(f"env value for {key} too long")
+        return v
 
     def to_message(self) -> dict[str, Any]:
         msg: dict[str, Any] = {"type": "exec"}
@@ -274,6 +343,7 @@ class ExecSpec(_Strict):
 
 __all__ = [
     "BOARDS",
+    "EXEC_LIMIT_KEYS",
     "EXTRA_KEYS",
     "NODE_ID",
     "RUN_ID",
@@ -287,8 +357,10 @@ __all__ = [
     "Pong",
     "ProtocolError",
     "Sched",
+    "clean",
     "json_size",
     "parse_agent_message",
     "parse_hello",
+    "safe_text",
     "welcome",
 ]

@@ -50,7 +50,9 @@ Phase 2 기준 구현 명세. 설계 배경은 `docs/PLAN.md` 12.1, 보안 요�
 - `metrics.data.extra`는 허용 키만 남긴다: `bpu`, `throttled`, `core_volts`, `reboot_required`,
   `isolation_mode`. 필터 후에도 4 KB 또는 64키를 넘으면 `extra`를 비우고 위반 1회.
 - `cmd_output.data`는 직렬화 기준 64 KiB 이하.
-- `NaN`/`Infinity`는 JSON이 아니므로 어디에 있어도 위반.
+- `NaN`/`Infinity`는 JSON이 아니므로 어디에 있어도 위반. 중첩 깊이 32 초과도 위반.
+- JSON 이스케이프(`\udXXX`)로 들어온 짝 없는 UTF-16 서로게이트는 U+FFFD로 바꿔서 받는다(위반 아님):
+  에이전트는 명령 출력의 깨진 바이트를 그렇게 보낼 수 있다.
 - 알 수 없는 최상위 필드는 위반 (마스터→에이전트 방향은 반대로, 모르는 타입은 무시한다: 구 버전
   에이전트가 새 마스터와 공존할 수 있게).
 - 위반 10회 누적 시 close `1008`. 위반은 로그에 남고 연결마다 센다.
@@ -78,6 +80,7 @@ Phase 2 기준 구현 명세. 설계 배경은 `docs/PLAN.md` 12.1, 보안 요�
 ```
 
 - `node_id`: `^[a-z0-9][a-z0-9-]{0,62}$`. `board`: `rpi3 | rdkx3 | generic`.
+- `board`는 `^[a-z0-9_-]{1,32}$`, `agent_version`은 출력 가능한 ASCII 64자 이하 (로그에 그대로 찍히므로).
 - `static_info`는 **참고 정보**다. 특히 `labels`/`capacity`는 레지스트리의 관리자 설정과 다르면
   경고만 남기고 무시한다 (security.md 8.3). `board`가 등록값과 다르면 `node_board_mismatch` 알림.
 - `running_commands`: 재접속 시 아직 실행 중인 run_id. 마스터가 발급한 적 없는 id는 경고 로그.
@@ -106,7 +109,10 @@ Phase 2 기준 구현 명세. 설계 배경은 `docs/PLAN.md` 12.1, 보안 요�
 }
 ```
 
-- `ts`는 에이전트 벽시계(양수). 마스터는 수신 시각도 따로 기록한다.
+- `ts`는 에이전트 벽시계(양수, 참고용). 링 버퍼의 정렬·조회(`?since=`)와 롤업 버킷은 **마스터 수신
+  시각**을 쓴다(Raspberry Pi에는 RTC가 없다). API의 샘플에는 `ts`(수신)와 `agent_ts`(에이전트)가 함께 나간다.
+- 메시지 전체는 직렬화 기준 64 KiB(`agent.metrics_max_bytes`) 이하. 넘으면 버리고 위반 1회.
+- 요약값은 범위를 벗어나면 `null`로 저장한다(CPU/메모리/디스크 0–100 %, 온도 -50–150 °C, 전송률 0–10^11 B/s, bool 제외).
 - `data` 안의 키는 수집기가 늘릴 수 있다. 마스터는 `cpu.percent`, `mem.percent`, `temp_c`,
   `disk[mount="/"].percent`, `net.*.rx_bps/tx_bps`, `extra.bpu`를 요약(`Sample`)해 링 버퍼(노드당 720개)
   와 1분 롤업(`metrics_1m`)에 넣고, 원본 `data`는 "최신 1개"만 메모리에 둔다.
@@ -132,6 +138,10 @@ Phase 2 기준 구현 명세. 설계 배경은 `docs/PLAN.md` 12.1, 보안 요�
 
 - `status`: `ok | error | timeout | cancelled | oom | scheduled | rejected | failed_to_start`.
 - 같은 소유권 규칙. 수신 시 run이 종료되고 `command.finished` 이벤트가 난다.
+- 마스터가 더 추적하지 않는 run(lockdown으로 종료 처리, lost 처리, 마스터 재시작 뒤의
+  `pending_results`)의 `cmd_output`/`cmd_result`는 **위반이 아니라 무시**된다(로그만). 다른 노드에
+  발급된 run_id를 쓰는 것만 위반이다.
+- `reason`이 512자를 넘으면 잘라서 받는다(메시지 거부 아님).
 - 마스터가 run을 발급한 뒤 `timeout + 120초` 안에 결과가 없으면 마스터가 합성 결과
   (`failed_to_start` 또는 `error`, reason `no result from the agent`)로 종료시킨다.
 
@@ -157,11 +167,12 @@ Phase 2 기준 구현 명세. 설계 배경은 `docs/PLAN.md` 12.1, 보안 요�
 {"type": "exec", "run_id": "<[A-Za-z0-9_-]{1,64}>",
  "mode": "shell", "command": "echo hi",
  "as_root": false, "timeout": 600, "network": "internet",
- "limits": {"mem_mb": 256}, "env": {"CW_X": "1"}}
+ "limits": {"memory_mb": 256, "cpu_pct": 50}, "env": {"CW_X": "1"}}
 ```
 
 - `mode: preset`이면 `argv` 배열, `root_op`가 있으면 `params`와 함께 execd 정책 템플릿 실행.
-- `network`: `none | lan | internet`. `limits`/`env`는 execd가 clamp·allow-list한다.
+- `network`: `none | lan | internet`. `limits` 키는 `memory_mb | cpu_pct | tasks | timeout_s`만
+  (마스터의 `ExecSpec`과 execd가 모두 검사), `env` 키는 `CW_[A-Z0-9_]+`만. 값은 execd가 노드 정책으로 clamp한다.
 - 에이전트가 모르는 run_id 형식, 중복 run_id, lockdown 중의 exec는 각각 무시/무시/`rejected`.
 
 ### `cancel`

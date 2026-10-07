@@ -63,6 +63,7 @@ class AgentLimits:
     msgs_per_s: float = 50.0
     bytes_per_s: int = 1024 * 1024
     metrics_min_interval_s: float = 2.0
+    metrics_max_bytes: int = 64 * 1024  # one metrics message, serialized
     extra_max_bytes: int = 4096
     extra_max_keys: int = 64
     static_info_max_bytes: int = 16 * 1024
@@ -131,6 +132,13 @@ class MasterConfig:
             raise ConfigError("agent.offline_after_s must be at least twice metrics_interval_s")
         if a.ws_max_bytes < 64 * 1024 or a.output_chunk_max_bytes > a.ws_max_bytes:
             raise ConfigError("agent websocket size limits are inconsistent")
+        if a.metrics_max_bytes < 4096 or a.metrics_max_bytes > a.ws_max_bytes:
+            raise ConfigError("agent.metrics_max_bytes must be between 4 KiB and ws_max_bytes")
+        if a.metrics_interval_s < 2 * a.metrics_min_interval_s:
+            # welcome tells agents the interval; the hub refuses anything faster than min
+            raise ConfigError(
+                "agent.metrics_interval_s must be at least twice metrics_min_interval_s"
+            )
         if a.ring_size < 1:
             raise ConfigError("agent.ring_size must be positive")
         for origin in self.web.origins:

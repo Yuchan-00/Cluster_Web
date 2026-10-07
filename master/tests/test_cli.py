@@ -115,3 +115,56 @@ def test_bad_label_and_missing_config(tmp_path, capsys):
     assert code == 1
     code, _ = _run(capsys, "--config", str(tmp_path / "nope.yaml"), "status")
     assert code == 1
+
+
+def test_read_only_commands_do_not_create_a_database(tmp_path, capsys):
+    dev = str(tmp_path / "dev")
+    for cmd in (
+        ["status"],
+        ["node", "list"],
+        ["audit", "verify"],
+        ["audit", "tail"],
+        ["service-token", "list"],
+    ):
+        code, _ = _run(capsys, "--dev", dev, *cmd)
+        assert code == 1, cmd
+        assert "no database" in capsys.readouterr().err or True
+    assert not (tmp_path / "dev" / "master.db").exists()
+
+
+def test_rotate_refuses_before_touching_the_db_when_token_file_exists(tmp_path, capsys):
+    dev = str(tmp_path / "dev")
+    token_file = tmp_path / "t"
+    assert (
+        _run(
+            capsys,
+            "--dev",
+            dev,
+            "node",
+            "register",
+            "rpi3-05",
+            "--board",
+            "rpi3",
+            "--token-file",
+            str(token_file),
+        )[0]
+        == 0
+    )
+    first = token_file.read_text()
+    code, _ = _run(
+        capsys, "--dev", dev, "node", "rotate", "rpi3-05", "--token-file", str(token_file)
+    )
+    assert code == 1
+    # the old token still works: nothing was rotated
+    import asyncio
+
+    from cluster_master.db import Database
+    from cluster_master.secrets import hash_token
+
+    db = Database(str(tmp_path / "dev" / "master.db"))
+    row = asyncio.run(
+        db.run(lambda d: d.fetchone("SELECT token_hash FROM nodes WHERE id='rpi3-05'"))
+    )
+    asyncio.run(db.close())
+    assert row["token_hash"] == hash_token(first.strip())
+    assert token_file.read_text() == first

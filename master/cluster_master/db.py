@@ -48,31 +48,34 @@ class SyncDB:
     # -- schema ----------------------------------------------------------------------------
 
     def migrate(self) -> int:
-        """Apply migrations/NNNN_*.sql in order; return the schema version."""
-        self.conn.execute(
-            "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY, "
-            "applied_ms INTEGER NOT NULL)"
-        )
-        applied = {r[0] for r in self.conn.execute("SELECT version FROM schema_version")}
+        """Apply migrations/NNNN_*.sql in order; return the schema version.
+
+        Everything (reading the applied versions, the schema statements, the version rows)
+        happens in one BEGIN IMMEDIATE transaction, so two processes starting on a fresh
+        database serialise instead of one failing on a duplicate version row.
+        """
         files = sorted(
             f
             for f in resources.files("cluster_master.migrations").iterdir()
             if f.name.endswith(".sql")
         )
-        for entry in files:
-            version = int(entry.name.split("_", 1)[0])
-            if version in applied:
-                continue
-            # executescript() commits any open transaction first, so the script carries its
-            # own BEGIN/COMMIT: schema and version row land together or not at all.
-            script = entry.read_text(encoding="utf-8")
-            self.conn.executescript(
-                "BEGIN IMMEDIATE;\n"
-                + script
-                + "\nINSERT INTO schema_version (version, applied_ms) VALUES "
-                + f"({int(version)}, {now_ms()});\nCOMMIT;"
+        with self.transaction(immediate=True):
+            self.conn.execute(
+                "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY, "
+                "applied_ms INTEGER NOT NULL)"
             )
-        row = self.conn.execute("SELECT MAX(version) FROM schema_version").fetchone()
+            applied = {r[0] for r in self.conn.execute("SELECT version FROM schema_version")}
+            for entry in files:
+                version = int(entry.name.split("_", 1)[0])
+                if version in applied:
+                    continue
+                for statement in split_statements(entry.read_text(encoding="utf-8")):
+                    self.conn.execute(statement)
+                self.conn.execute(
+                    "INSERT INTO schema_version (version, applied_ms) VALUES (?, ?)",
+                    (version, now_ms()),
+                )
+            row = self.conn.execute("SELECT MAX(version) FROM schema_version").fetchone()
         return int(row[0] or 0)
 
     # -- transactions ------------------------------------------------------------------------
@@ -85,10 +88,21 @@ class SyncDB:
         try:
             yield self.conn
         except BaseException:
-            self.conn.execute("ROLLBACK")
+            self._rollback()
             raise
-        else:
+        try:
             self.conn.execute("COMMIT")
+        except sqlite3.Error:
+            # a failed COMMIT (disk full, busy) must not leave the connection in a transaction
+            self._rollback()
+            raise
+
+    def _rollback(self) -> None:
+        try:
+            if self.conn.in_transaction:
+                self.conn.execute("ROLLBACK")
+        except sqlite3.Error:  # pragma: no cover - nothing more can be done here
+            pass
 
     # -- helpers -----------------------------------------------------------------------------
 
@@ -126,6 +140,22 @@ class Database:
     async def close(self) -> None:
         async with self._lock:
             await asyncio.to_thread(self.sync.close)
+
+
+def split_statements(script: str) -> list[str]:
+    """Split an SQL script into complete statements (triggers contain ';' inside BEGIN..END)."""
+    statements, buf = [], ""
+    for line in script.splitlines():
+        stripped = line.strip()
+        if not buf and (not stripped or stripped.startswith("--")):
+            continue
+        buf += line + "\n"
+        if sqlite3.complete_statement(buf):
+            statements.append(buf.strip())
+            buf = ""
+    if buf.strip():
+        raise ValueError("migration ends with an incomplete statement")
+    return statements
 
 
 def row_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:

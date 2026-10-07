@@ -33,6 +33,7 @@ CLOSE_SLOW = 4000
 CLOSE_ORIGIN = 4403
 CLOSE_PROTOCOL = 1008
 MAX_CLIENTS = 32
+CLOSE_TIMEOUT_S = 5.0  # a browser with a full receive window must not stall shutdown
 UI_EVENTS = frozenset(EVENT_TYPES - {"cmd_output"})  # raw command output goes via Phase 4's API
 
 
@@ -51,6 +52,7 @@ class UiHub:
     def __init__(self, bus: EventBus, *, origins: list[str]) -> None:
         self.bus = bus
         self.origins = {o.rstrip("/").lower() for o in origins}
+        self.hosts = {urlparse(o).netloc.lower() for o in self.origins}
         self._clients: set[UiClient] = set()
         self._unsubscribe = None
 
@@ -77,10 +79,13 @@ class UiHub:
         origin = origin.rstrip("/").lower()
         if origin in self.origins:
             return True
-        # Same-origin fallback: the page was served by the host the socket is reached on.
+        # Same-origin fallback for the loopback development master only: the Host must be a
+        # loopback literal, so a DNS-rebound name pointing at 127.0.0.1 does not qualify.
         host = ws.headers.get("host", "").lower()
         parsed = urlparse(origin)
-        return bool(host) and parsed.netloc == host and parsed.scheme in ("http", "https")
+        if not host or parsed.netloc != host or parsed.scheme not in ("http", "https"):
+            return False
+        return host in self.hosts or _is_loopback_host(host)
 
     # -- endpoint --------------------------------------------------------------------------
 
@@ -196,6 +201,15 @@ def _offer(client: UiClient, payload: str | dict[str, Any]) -> None:
         client.queue.put_nowait(None)
 
 
+def _is_loopback_host(host: str) -> bool:
+    name = host.rsplit(":", 1)[0] if host.count(":") == 1 else host
+    if name.startswith("[") and name.endswith("]"):
+        name = name[1:-1]
+    elif name.startswith("[") and "]:" in host:
+        name = host[1 : host.index("]")]
+    return name in ("127.0.0.1", "localhost", "::1")
+
+
 async def _deny(ws: WebSocket, status: int, close_code: int) -> None:
     """Refuse before the handshake completes: an HTTP status, or a close code as fallback."""
     try:
@@ -207,8 +221,8 @@ async def _deny(ws: WebSocket, status: int, close_code: int) -> None:
 async def _close(ws: WebSocket, code: int, reason: str) -> None:
     try:
         if ws.client_state != WebSocketState.DISCONNECTED:
-            await ws.close(code=code, reason=reason)
-    except (RuntimeError, OSError, WebSocketDisconnect):
+            await asyncio.wait_for(ws.close(code=code, reason=reason), CLOSE_TIMEOUT_S)
+    except (RuntimeError, OSError, WebSocketDisconnect, asyncio.TimeoutError):
         pass
 
 

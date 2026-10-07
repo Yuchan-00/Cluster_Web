@@ -37,6 +37,10 @@ def test_timing_consistency():
         parse_config({"agent": {"metrics_interval_s": 0}})
     with pytest.raises(ConfigError, match="size limits"):
         parse_config({"agent": {"ws_max_bytes": 1024}})
+    with pytest.raises(ConfigError, match="twice metrics_min_interval_s"):
+        parse_config({"agent": {"metrics_interval_s": 2, "metrics_min_interval_s": 2}})
+    with pytest.raises(ConfigError, match="metrics_max_bytes"):
+        parse_config({"agent": {"metrics_max_bytes": 1024}})
 
 
 def test_uds_mode_accepts_octal_string():

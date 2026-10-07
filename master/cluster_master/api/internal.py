@@ -82,7 +82,7 @@ ROOT = require(root=True)
 
 
 class AdminNodeCreate(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", strict=True)
     id: str = Field(min_length=1, max_length=63)
     board: str
     labels: dict[str, Any] | None = None
@@ -90,7 +90,7 @@ class AdminNodeCreate(BaseModel):
 
 
 class AdminNodePatch(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", strict=True)
     labels: dict[str, Any] | None = None
     capacity: dict[str, int] | None = None
     sched_state: str | None = None
@@ -98,13 +98,13 @@ class AdminNodePatch(BaseModel):
 
 
 class AdminLockdown(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", strict=True)
     active: bool
     reason: str | None = Field(default=None, max_length=200)
 
 
 class AdminServiceToken(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", strict=True)
     principal: str = Field(max_length=32)
     scopes: list[str] = Field(min_length=1, max_length=8)
 
@@ -151,6 +151,8 @@ async def a_patch_node(
     node_id: str, body: AdminNodePatch, request: Request, principal: Principal = ROOT
 ) -> dict[str, Any]:
     st = state_of(request)
+    if body.sched_reason is not None and body.sched_state is None:
+        raise HTTPException(status_code=422, detail="sched_reason requires sched_state")
     try:
         await st.nodes.update(
             node_id,
@@ -196,7 +198,7 @@ async def a_delete_node(node_id: str, request: Request, principal: Principal = R
         await st.nodes.remove(node_id, actor=principal.audit_actor())
     except NodeNotFound:
         raise HTTPException(status_code=404, detail="unknown node") from None
-    st.metrics.forget(node_id)
+    await st.metrics.forget_db(node_id)
     await st.alerts.resolve_node(node_id)
     return None
 
@@ -251,7 +253,7 @@ async def a_audit_verify(request: Request, _: Principal = ROOT) -> dict[str, Any
 async def a_audit_tail(
     request: Request,
     limit: int = Query(default=50, ge=1, le=1000),
-    before: int | None = Query(default=None, ge=1),
+    before: int | None = Query(default=None, ge=1, le=1 << 62),
     _: Principal = ROOT,
 ) -> list[dict[str, Any]]:
     return await state_of(request).audit.tail(limit=limit, before_id=before)

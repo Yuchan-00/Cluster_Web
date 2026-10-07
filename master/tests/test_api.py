@@ -223,3 +223,47 @@ async def test_admin_socket_operations(admin, state):
     assert (await admin.delete("/internal/admin/service-tokens/999")).status_code == 404
     assert (await admin.delete("/internal/admin/nodes/rdkx3-01")).status_code == 204
     assert (await admin.delete("/internal/admin/nodes/rdkx3-01")).status_code == 404
+
+
+async def test_history_returns_latest_rows_and_merges_buckets(web, state):
+    await web.post("/api/nodes", json=NODE)
+    base = (time.time() // 60) * 60 - 3600  # an hour ago, so the default until=now covers it
+    for i in range(3):
+        state.metrics.add("rpi3-01", Metrics.model_validate(metrics(cpu=float(10 * (i + 1)))))
+        assert await state.metrics.rollup(now=base + 60 * i) == 1
+    # a second rollup into the same bucket merges instead of overwriting
+    state.metrics.add("rpi3-01", Metrics.model_validate(metrics(cpu=50.0)))
+    assert await state.metrics.rollup(now=base + 120) == 1
+    rows = await state.metrics.history("rpi3-01", 0, until_ms=int((base + 1000) * 1000))
+    assert [r["cpu_avg"] for r in rows] == [10.0, 20.0, 40.0]  # (30+50)/2 merged
+    assert rows[-1]["extra"] == {"samples": 2}
+    r = await web.get(
+        "/api/nodes/rpi3-01/metrics", params={"history": "true", "since": 0, "limit": 2}
+    )
+    assert [row["cpu_avg"] for row in r.json()["rows"]] == [20.0, 40.0]  # newest two, ascending
+    assert (await web.delete("/api/nodes/rpi3-01")).status_code == 204
+    assert await state.metrics.history("rpi3-01", 0, until_ms=int((base + 1000) * 1000)) == []
+
+
+async def test_patch_and_body_strictness(web):
+    await web.post("/api/nodes", json=NODE)
+    r = await web.patch("/api/nodes/rpi3-01", json={"sched_reason": "why"})
+    assert r.status_code == 422
+    r = await web.patch("/api/nodes/rpi3-01", json={})
+    assert r.status_code == 422
+    r = await web.post(
+        "/api/nodes", json={"id": "rpi3-02", "board": "rpi3", "capacity": {"slots": True}}
+    )
+    assert r.status_code == 422
+    r = await web.post(
+        "/api/nodes", json={"id": "rpi3-02", "board": "rpi3", "capacity": {"slots": "2"}}
+    )
+    assert r.status_code == 422
+    r = await web.post("/api/nodes", json={"id": "rpi3-02\n", "board": "rpi3"})
+    assert r.status_code == 422
+    r = await web.get("/api/alerts", params={"before": 10**30})
+    assert r.status_code == 422
+    r = await web.post(
+        "/api/nodes", json={"id": "rpi3-02", "board": "rpi3", "capacity": {"slots": 2}}
+    )
+    assert r.status_code == 201

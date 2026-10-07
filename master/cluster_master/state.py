@@ -73,8 +73,16 @@ class AppState:
         await self.ui.start()
 
     async def stop(self) -> None:
+        await self.disconnect_all()
+        await self.close()
+
+    async def disconnect_all(self) -> None:
+        """Step 1 of shutdown: close every browser and agent connection (1001)."""
         await self.ui.stop()
         await self.hub.stop()
+
+    async def close(self) -> None:
+        """Step 2 of shutdown, after the servers have drained: flush and close the database."""
         try:
             await self.metrics.rollup()
         finally:

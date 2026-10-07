@@ -601,7 +601,7 @@ approvals (
 |---|---|
 | 신원 고정 | 연결의 node_id는 토큰으로 결정된다. 메시지 안의 node_id·hostname 필드는 무시하거나 일치 확인용(불일치 시 close 4403) |
 | run_id 소유 | `cmd_output`/`cmd_result`/잡 상태 메시지는 **master가 그 노드에 보낸 run_id**에 대해서만 받는다. 다른 노드의 run_id면 버리고 경보 |
-| 중복 연결 | 같은 노드의 새 연결이 오면 이전 연결을 close 4409로 끊고 `alert.raised`(토큰 탈취 징후) |
+| 중복 연결 | 같은 노드의 연결이 이미 살아 있으면(마지막 메시지가 `2 × metrics_interval` 이내) **새** 연결을 close 4409로 끊고 `alert.raised`(토큰 탈취 징후). 기존 연결이 그보다 오래 조용하면 죽은 것으로 보고 기존 연결을 4409로 닫고 새 연결을 받는다(알림 없음). 상세는 `docs/protocol.md` 1장 |
 | 스키마 | pydantic 엄격 모델(타입·길이·범위). 알 수 없는 `type`은 버리고 카운트 |
 | 크기 | WebSocket 메시지 최대 1 MiB (`max_size`), 출력 청크 64 KiB |
 | 필드 상한 | `metrics.extra` 직렬화 후 ≤ 4 KB · 키 ≤ 64개 · **허용 목록 키만**(`bpu`, `throttled`, `reboot_required`, `isolation_mode` 등, 목록은 코드 상수) · `sched.running`, `sched.cached_bundles` 배열 길이 ≤ 64, 요소 문자열 ≤ 32자 · `static_info` 직렬화 후 ≤ 16 KB. 초과분은 잘라내고 `rejected_fields` 카운트, 10분 지속 시 `alert.raised`(security.node_input). `metrics_1m.extra` 저장 시에도 같은 상한을 다시 적용 |

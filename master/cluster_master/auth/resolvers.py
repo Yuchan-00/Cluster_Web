@@ -11,6 +11,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import logging
+import re
 import time
 from typing import Any
 
@@ -24,6 +25,7 @@ from .principal import DEV_ADMIN, SERVICE_SCOPES, Principal, root_principal
 
 log = logging.getLogger(__name__)
 SERVICE_PRINCIPALS = ("telegram-bot", "ai-operator", "test-client")
+ON_BEHALF_OF = re.compile(r"^[A-Za-z0-9_.@:-]{1,64}$")
 
 
 def client_ip(conn: HTTPConnection) -> str | None:
@@ -204,12 +206,16 @@ class ServiceTokenResolver:
             raise AuthError("invalid service token")
         acting_for = conn.headers.get("x-on-behalf-of")
         if acting_for:
+            # Attribution only (the audit row's on_behalf_of); the service vouches for it.
+            # Phase 5 binds Telegram chat ids to users and checks this against that table.
+            if not ON_BEHALF_OF.fullmatch(acting_for):
+                raise AuthError("invalid X-On-Behalf-Of")
             principal = Principal(
                 kind=principal.kind,
                 id=principal.id,
                 channel=principal.channel,
                 scopes=principal.scopes,
-                on_behalf_of=acting_for[:64],
+                on_behalf_of=acting_for,
             )
         return principal
 

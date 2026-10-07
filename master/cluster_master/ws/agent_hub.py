@@ -1,8 +1,9 @@
-"""Agent WebSocket hub: /ws/agent (docs/PLAN.md 12.1, security.md 8).
+"""Agent WebSocket hub: /ws/agent (docs/PLAN.md 12.1, security.md 8, docs/protocol.md).
 
 One connection per node. The token travels in the upgrade request (`Authorization: Bearer
 cat_...` + `X-Node-Id`); a bad token gets an HTTP 401 before the handshake completes. After
-`hello` the connection is pinned to the node id it authenticated as. Everything the agent
+`hello` the connection is pinned to the node id it authenticated as, and the token is checked a
+second time so a revocation between handshake and hello cannot be outrun. Everything the agent
 sends is validated (`models.py`), counted against the per-connection limits and, for command
 traffic, checked against the runs this master issued to that node.
 
@@ -17,7 +18,7 @@ import json
 import logging
 import secrets
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -39,6 +40,7 @@ from ..models import (
     json_size,
     parse_agent_message,
     parse_hello,
+    safe_text,
     welcome,
 )
 from ..secrets import NODE_PREFIX, is_token
@@ -61,10 +63,13 @@ CLOSE_GOING_AWAY = 1001
 MAX_VIOLATIONS = 10  # protocol slips tolerated per connection before 1008
 AUTH_FAIL_WINDOW_S = 600.0
 AUTH_FAIL_ALERT = 5
+AUTH_FAIL_PEERS = 1024  # distinct peers remembered
 OUTPUT_QUEUE_CHUNKS = 1024  # per run, before chunks are dropped (Phase 4 spools to disk)
 SEND_TIMEOUT_S = 10.0
 RUN_GRACE_S = 120.0  # after the spec's timeout, a run without a result is reported lost
+FORGOTTEN_RUNS = 4096  # finished/lost run ids remembered so late results are not violations
 WATCHDOG_INTERVAL_S = 1.0
+CLOSE_REASON_BYTES = 120  # the close frame allows 123 bytes of reason
 
 
 class HubError(RuntimeError):
@@ -100,7 +105,7 @@ class TokenBucket:
 @dataclass
 class RunHandle:
     """A command issued to a node. Output arrives on `output` (None marks the end); `result`
-    resolves with the agent's cmd_result, or a synthetic `lost` result."""
+    resolves with the agent's cmd_result, or a synthetic result when the master gives up."""
 
     run_id: str
     node_id: str
@@ -143,6 +148,7 @@ class Connection:
     last_message: float = 0.0
     last_metrics: float | None = None
     violations: int = 0
+    ignored: int = 0  # results for runs the master no longer tracks
     msg_bucket: TokenBucket = field(init=False)
     byte_bucket: TokenBucket = field(init=False)
     send_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -200,14 +206,18 @@ class AgentHub:
         self.audit = audit
         self.clock = clock
         self._conns: dict[str, Connection] = {}
+        self._admitting: dict[str, asyncio.Lock] = {}
         self._runs: dict[str, RunHandle] = {}
+        self._forgotten: OrderedDict[str, str] = OrderedDict()  # run_id -> node_id
         self._auth_failures: dict[str, deque[float]] = {}
         self._watchdog: asyncio.Task | None = None
         self._unsubscribe = None
+        self._stopping = False
 
     # -- lifecycle -------------------------------------------------------------------------
 
     async def start(self) -> None:
+        self._stopping = False
         unsub_lockdown = self.bus.subscribe(self._on_lockdown_event, "system.lockdown")
         unsub_nodes = self.bus.subscribe(self._on_node_event, "node.updated", "node.removed")
 
@@ -219,6 +229,9 @@ class AgentHub:
         self._watchdog = asyncio.create_task(self._watchdog_loop(), name="agent-hub-watchdog")
 
     async def stop(self) -> None:
+        """Close every agent (1001) and finish every run. Nodes are not marked offline in
+        alerts: the master is going away, not the nodes."""
+        self._stopping = True
         if self._watchdog is not None:
             self._watchdog.cancel()
             try:
@@ -229,11 +242,16 @@ class AgentHub:
         if self._unsubscribe is not None:
             self._unsubscribe()
             self._unsubscribe = None
-        for conn in list(self._conns.values()):
-            await self._close(conn, CLOSE_GOING_AWAY, "master shutting down")
+        await asyncio.gather(
+            *(
+                self._close(c, CLOSE_GOING_AWAY, "master shutting down")
+                for c in list(self._conns.values())
+            ),
+            return_exceptions=True,
+        )
         for handle in list(self._runs.values()):
+            self._untrack(handle)
             handle.finish(_lost(handle, "master shutting down"))
-        self._runs.clear()
 
     def connections(self) -> list[dict[str, Any]]:
         return [c.view() for c in self._conns.values()]
@@ -248,7 +266,7 @@ class AgentHub:
         node_id = ws.headers.get("x-node-id", "")
         scheme, _, token = ws.headers.get("authorization", "").partition(" ")
         token = token.strip()
-        claimed = node_id if NODE_ID.match(node_id) else None
+        claimed = node_id if NODE_ID.fullmatch(node_id) else None
         if (
             claimed is None
             or scheme.lower() != "bearer"
@@ -272,8 +290,8 @@ class AgentHub:
         try:
             hello = parse_hello(raw)
         except ProtocolError as exc:
-            log.warning("node %s from %s: %s", claimed, peer, exc)
-            await _close_ws(ws, exc.close_code, str(exc)[:120])
+            log.warning("node %s from %s: %s", claimed, peer, safe_text(str(exc)))
+            await _close_ws(ws, exc.close_code, str(exc))
             return
         if hello.node_id != claimed:
             await self._identity_mismatch(ws, peer, claimed, hello.node_id)
@@ -283,30 +301,57 @@ class AgentHub:
             return
 
         conn = Connection(claimed, ws, peer, hello, self.limits, self.clock)
-        if not await self._admit(conn):
+        if not await self._admit(conn, token):
             return
         try:
             await self._session(conn)
         finally:
             await self._drop(conn, conn_reason(conn))
 
-    async def _admit(self, conn: Connection) -> bool:
-        existing = self._conns.get(conn.node_id)
-        if existing is not None:
-            stale = self.clock() - existing.last_message > 2 * self.limits.metrics_interval_s
-            if stale:
-                log.warning(
-                    "node %s: replacing silent connection from %s with %s",
-                    conn.node_id,
-                    existing.peer,
-                    conn.peer,
-                )
-                await self._close(existing, CLOSE_DUPLICATE, "replaced by a new connection")
-                await self._drop(existing, "replaced")
-            else:
-                await self._duplicate(conn, existing)
-                return False
-        self._conns[conn.node_id] = conn
+    async def _admit(self, conn: Connection, token: str) -> bool:
+        """Register the connection as the node's one live connection.
+
+        Serialised per node: two hellos for the same node cannot both pass the duplicate check.
+        The slot in `_conns` is taken before the first await so that a revoke/remove event
+        arriving during admission finds (and closes) this connection, and the token is checked
+        again afterwards so a revoke that landed before admission is honoured too.
+        """
+        lock = self._admitting.setdefault(conn.node_id, asyncio.Lock())
+        try:
+            async with lock:
+                if self._stopping:
+                    await _close_ws(conn.ws, CLOSE_GOING_AWAY, "master shutting down")
+                    return False
+                existing = self._conns.get(conn.node_id)
+                if existing is not None:
+                    stale = (
+                        self.clock() - existing.last_message > 2 * self.limits.metrics_interval_s
+                    )
+                    if not stale:
+                        await self._duplicate(conn, existing)
+                        return False
+                    log.warning(
+                        "node %s: replacing silent connection from %s with %s",
+                        conn.node_id,
+                        existing.peer,
+                        conn.peer,
+                    )
+                    self._conns[conn.node_id] = conn  # take the slot before any await
+                    await self._close(existing, CLOSE_DUPLICATE, "replaced by a new connection")
+                    await self._drop(existing, "replaced", alert=False)
+                else:
+                    self._conns[conn.node_id] = conn
+                return await self._finish_admission(conn, token)
+        finally:
+            if not lock.locked():
+                self._admitting.pop(conn.node_id, None)
+
+    async def _finish_admission(self, conn: Connection, token: str) -> bool:
+        # Revoked or rotated between the handshake and hello? The hash is re-read from the DB.
+        if not await self.nodes.authenticate(conn.node_id, token):
+            self._release(conn)
+            await _close_ws(conn.ws, CLOSE_AUTH, "token changed")
+            return False
         try:
             await self.nodes.on_connect(
                 conn.node_id,
@@ -317,15 +362,19 @@ class AgentHub:
                 running_commands=list(conn.hello.running_commands),
             )
         except NodeNotFound:
-            # Removed between authenticate() and now.
-            self._conns.pop(conn.node_id, None)
+            self._release(conn)
             await _close_ws(conn.ws, CLOSE_AUTH, "node removed")
+            return False
+        if conn.closing or self._conns.get(conn.node_id) is not conn:
+            # a node event (revoke/remove) closed us while on_connect was in flight
             return False
         status = self.nodes.status(conn.node_id)
         if any("board" in w for w in status.warnings):
             await self.alerts.raise_(
                 "node_board_mismatch", node_id=conn.node_id, message="; ".join(status.warnings)
             )
+        else:
+            await self.alerts.resolve("node_board_mismatch", node_id=conn.node_id)
         await self.alerts.resolve("node_offline", node_id=conn.node_id)
         unknown = [r for r in conn.hello.running_commands if r not in self._runs]
         if unknown:
@@ -358,6 +407,10 @@ class AgentHub:
         )
         return True
 
+    def _release(self, conn: Connection) -> None:
+        if self._conns.get(conn.node_id) is conn:
+            del self._conns[conn.node_id]
+
     async def _session(self, conn: Connection) -> None:
         ws = conn.ws
         while True:
@@ -367,12 +420,14 @@ class AgentHub:
                 conn.closing = True
                 conn.disconnect_code = exc.code
                 return
+            if conn.closing:
+                return
             if raw is None:
                 await self._close(conn, CLOSE_PROTOCOL, "binary frame")
                 return
             now = self.clock()
             conn.last_message = now
-            size = len(raw.encode("utf-8"))
+            size = len(raw.encode("utf-8", "surrogatepass"))
             if not conn.msg_bucket.take() or not conn.byte_bucket.take(size):
                 await self._rate_limited(conn, size)
                 return
@@ -383,28 +438,30 @@ class AgentHub:
                     return
                 continue
             try:
-                ok = await self._dispatch(conn, msg, now)
+                ok = await self._dispatch(conn, msg, now, size)
             except Exception:  # noqa: BLE001 - one bad message must not take the node down
                 log.exception("node %s: error handling %s", conn.node_id, msg.type)
                 ok = True
             if not ok:
                 return
 
-    async def _dispatch(self, conn: Connection, msg: Any, now: float) -> bool:
+    async def _dispatch(self, conn: Connection, msg: Any, now: float, size: int) -> bool:
         if isinstance(msg, Metrics):
-            return await self._on_metrics(conn, msg, now)
+            return await self._on_metrics(conn, msg, now, size)
         if isinstance(msg, CmdOutput):
             return await self._on_output(conn, msg)
         if isinstance(msg, CmdResult):
             return await self._on_result(conn, msg)
         return True  # pong
 
-    async def _on_metrics(self, conn: Connection, m: Metrics, now: float) -> bool:
+    async def _on_metrics(self, conn: Connection, m: Metrics, now: float, size: int) -> bool:
         if (
             conn.last_metrics is not None
             and now - conn.last_metrics < self.limits.metrics_min_interval_s
         ):
             return await self._violation(conn, "metrics faster than the minimum interval")
+        if size > self.limits.metrics_max_bytes:
+            return await self._violation(conn, "metrics message too large")
         conn.last_metrics = now
         extra = filtered_extra(m.extra())
         if (
@@ -417,25 +474,49 @@ class AgentHub:
         else:
             m.data["extra"] = extra
         sample = self.metrics.add(conn.node_id, m)
-        self.nodes.set_sched(conn.node_id, m.sched.model_dump() if m.sched is not None else None)
+        sched = m.sched.model_dump() if m.sched is not None else None
+        self.nodes.set_sched(conn.node_id, sched)
         await self.nodes.on_message(conn.node_id, conn.peer)
         await self.bus.publish(
             "metrics",
             node_id=conn.node_id,
             ts=float(m.ts),
+            received=sample.received,
             sample=sample.as_dict(),
             data=m.data,
-            sched=m.sched.model_dump() if m.sched is not None else None,
+            sched=sched,
         )
         return True
 
+    def _owned_run(self, conn: Connection, run_id: str, what: str) -> RunHandle | None | bool:
+        """The handle if this node owns the run; None if the master no longer tracks it
+        (ignored, not a violation); False if it belongs to another node (forgery)."""
+        handle = self._runs.get(run_id)
+        if handle is not None:
+            return handle if handle.node_id == conn.node_id else False
+        owner = self._forgotten.get(run_id)
+        if owner is not None and owner != conn.node_id:
+            return False
+        conn.ignored += 1
+        if conn.ignored <= 3 or conn.ignored % 100 == 0:
+            log.info(
+                "node %s: %s for run %s this master no longer tracks; ignored (%d so far)",
+                conn.node_id,
+                what,
+                run_id,
+                conn.ignored,
+            )
+        return None
+
     async def _on_output(self, conn: Connection, msg: CmdOutput) -> bool:
-        handle = self._runs.get(msg.run_id)
-        if handle is None or handle.node_id != conn.node_id:
-            return await self._violation(conn, "cmd_output for a run not issued to this node")
+        handle = self._owned_run(conn, msg.run_id, "cmd_output")
+        if handle is False:
+            return await self._violation(conn, "cmd_output for a run issued to another node")
         size = len(msg.data.encode("utf-8"))
         if size > self.limits.output_chunk_max_bytes:
             return await self._violation(conn, "cmd_output chunk too large")
+        if handle is None:
+            return True
         handle.output_bytes += size
         try:
             handle.output.put_nowait((msg.stream, msg.data))
@@ -447,14 +528,13 @@ class AgentHub:
         return True
 
     async def _on_result(self, conn: Connection, msg: CmdResult) -> bool:
-        handle = self._runs.get(msg.run_id)
-        if handle is None or handle.node_id != conn.node_id:
-            return await self._violation(conn, "cmd_result for a run not issued to this node")
-        del self._runs[msg.run_id]
+        handle = self._owned_run(conn, msg.run_id, "cmd_result")
+        if handle is False:
+            return await self._violation(conn, "cmd_result for a run issued to another node")
+        if handle is None:
+            return True
+        self._untrack(handle)
         handle.finish(msg)
-        status = self.nodes.status(conn.node_id)
-        if msg.run_id in status.running_commands:
-            status.running_commands.remove(msg.run_id)
         await self.bus.publish(
             "cmd_result", run_id=msg.run_id, node_id=conn.node_id, result=msg.model_dump()
         )
@@ -462,6 +542,15 @@ class AgentHub:
             "command.finished", run_id=msg.run_id, node_id=conn.node_id, status=msg.status
         )
         return True
+
+    def _untrack(self, handle: RunHandle) -> None:
+        self._runs.pop(handle.run_id, None)
+        self._forgotten[handle.run_id] = handle.node_id
+        while len(self._forgotten) > FORGOTTEN_RUNS:
+            self._forgotten.popitem(last=False)
+        running = self.nodes.status(handle.node_id).running_commands
+        if handle.run_id in running:
+            running.remove(handle.run_id)
 
     # -- commands (used by Phase 4's command service and by tests) ------------------------
 
@@ -475,6 +564,7 @@ class AgentHub:
             raise HubError(f"run {spec.run_id} already issued")
         handle = RunHandle(spec.run_id, node_id, spec)
         self._runs[spec.run_id] = handle
+        self._forgotten.pop(spec.run_id, None)
         try:
             await self._send(conn, spec.to_message())
         except HubError:
@@ -502,24 +592,30 @@ class AgentHub:
             raise NodeOffline(f"node {node_id} is offline")
         await self._send(conn, {"type": "config", "metrics_interval": interval})
 
-    # -- lockdown --------------------------------------------------------------------------
+    # -- lockdown and node events ----------------------------------------------------------
 
     async def _on_lockdown_event(self, event: Any) -> None:
         active = bool(event.data.get("active"))
         msg = {"type": "lockdown" if active else "unlock"}
-        for conn in list(self._conns.values()):
-            try:
-                await self._send(conn, msg)
-            except HubError:
-                pass
+        # concurrently: one stalled agent must not delay the kill switch for the others
+        await asyncio.gather(
+            *(self._send_quietly(c, msg) for c in list(self._conns.values())),
+            return_exceptions=True,
+        )
         if active:
             for handle in list(self._runs.values()):
                 # the agents cancel everything themselves; report it to the issuers now
+                self._untrack(handle)
                 handle.finish(_synthetic(handle, "cancelled", "lockdown"))
-            self._runs.clear()
+
+    async def _send_quietly(self, conn: Connection, msg: dict[str, Any]) -> None:
+        try:
+            await self._send(conn, msg)
+        except HubError:
+            pass
 
     async def _on_node_event(self, event: Any) -> None:
-        """A revoked token or a removed node disconnects the live agent at once."""
+        """A revoked/rotated token or a removed node disconnects the live agent at once."""
         node_id = event.data.get("node_id")
         conn = self._conns.get(node_id)
         if conn is None:
@@ -537,9 +633,11 @@ class AgentHub:
         self, conn: Connection, what: str, close_code: int = CLOSE_PROTOCOL
     ) -> bool:
         conn.violations += 1
-        log.warning("node %s: %s (%d/%d)", conn.node_id, what, conn.violations, MAX_VIOLATIONS)
+        log.warning(
+            "node %s: %s (%d/%d)", conn.node_id, safe_text(what), conn.violations, MAX_VIOLATIONS
+        )
         if conn.violations >= MAX_VIOLATIONS or close_code != CLOSE_PROTOCOL:
-            await self._close(conn, close_code, what[:120])
+            await self._close(conn, close_code, what)
             return False
         return True
 
@@ -555,7 +653,11 @@ class AgentHub:
     async def _auth_failed(self, ws: WebSocket, peer: str | None, claimed: str | None) -> None:
         key = peer or "uds"
         now = self.clock()
-        window = self._auth_failures.setdefault(key, deque())
+        window = self._auth_failures.get(key)
+        if window is None:
+            while len(self._auth_failures) >= AUTH_FAIL_PEERS:
+                self._auth_failures.pop(next(iter(self._auth_failures)))
+            window = self._auth_failures[key] = deque()
         while window and now - window[0] > AUTH_FAIL_WINDOW_S:
             window.popleft()
         window.append(now)
@@ -662,36 +764,46 @@ class AgentHub:
         conn.close_reason = reason
         await _close_ws(conn.ws, code, reason)
 
-    async def _drop(self, conn: Connection, reason: str) -> None:
-        if self._conns.get(conn.node_id) is conn:
-            del self._conns[conn.node_id]
-            log.info("node %s offline (%s)", conn.node_id, reason)
+    async def _drop(self, conn: Connection, reason: str, *, alert: bool = True) -> None:
+        if self._conns.get(conn.node_id) is not conn:
+            return
+        del self._conns[conn.node_id]
+        log.info("node %s offline (%s)", conn.node_id, reason)
+        try:
+            await self.nodes.on_disconnect(conn.node_id, reason)
+        except Exception:  # noqa: BLE001
+            log.exception("node %s: on_disconnect failed", conn.node_id)
+        if alert and not self._stopping and self.nodes.get(conn.node_id) is not None:
             try:
-                await self.nodes.on_disconnect(conn.node_id, reason)
-            except Exception:  # noqa: BLE001
-                log.exception("node %s: on_disconnect failed", conn.node_id)
-            if self.nodes.get(conn.node_id) is not None:
                 await self.alerts.raise_(
                     "node_offline",
                     node_id=conn.node_id,
                     message=f"{conn.node_id} offline: {reason}",
                 )
+            except Exception:  # noqa: BLE001 - the DB being closed must not kill the caller
+                log.exception("node %s: could not record the offline alert", conn.node_id)
 
     async def _watchdog_loop(self) -> None:
         while True:
             await asyncio.sleep(WATCHDOG_INTERVAL_S)
-            now = self.clock()
-            for conn in list(self._conns.values()):
-                if now - conn.last_message > self.limits.offline_after_s and not conn.closing:
-                    await self._close(conn, CLOSE_SILENT, "no messages")
-                    await self._drop(conn, "no messages")
-            for run_id, handle in list(self._runs.items()):
-                if now - handle.issued > handle.spec.timeout + RUN_GRACE_S:
-                    del self._runs[run_id]
-                    handle.finish(_lost(handle, "no result from the agent"))
-                    await self.bus.publish(
-                        "command.finished", run_id=run_id, node_id=handle.node_id, status="lost"
-                    )
+            try:
+                await self._watchdog_tick()
+            except Exception:  # noqa: BLE001 - the watchdog must outlive any single failure
+                log.exception("agent hub watchdog tick failed")
+
+    async def _watchdog_tick(self) -> None:
+        now = self.clock()
+        for conn in list(self._conns.values()):
+            if now - conn.last_message > self.limits.offline_after_s and not conn.closing:
+                await self._close(conn, CLOSE_SILENT, "no messages")
+                await self._drop(conn, "no messages")
+        for handle in list(self._runs.values()):
+            if now - handle.issued > handle.spec.timeout + RUN_GRACE_S:
+                self._untrack(handle)
+                handle.finish(_lost(handle, "no result from the agent"))
+                await self.bus.publish(
+                    "command.finished", run_id=handle.run_id, node_id=handle.node_id, status="lost"
+                )
 
 
 def conn_reason(conn: Connection) -> str:
@@ -702,11 +814,18 @@ def conn_reason(conn: Connection) -> str:
     return "connection closed"
 
 
+def _close_reason(reason: str) -> str:
+    """The close frame carries at most 123 bytes of UTF-8 reason; cut on a character boundary."""
+    return reason.encode("utf-8", "replace")[:CLOSE_REASON_BYTES].decode("utf-8", "ignore")
+
+
 async def _close_ws(ws: WebSocket, code: int, reason: str) -> None:
     try:
         if ws.client_state != WebSocketState.DISCONNECTED:
-            await asyncio.wait_for(ws.close(code=code, reason=reason[:120]), SEND_TIMEOUT_S)
-    except (RuntimeError, OSError, asyncio.TimeoutError, WebSocketDisconnect):
+            await asyncio.wait_for(
+                ws.close(code=code, reason=_close_reason(reason)), SEND_TIMEOUT_S
+            )
+    except (RuntimeError, OSError, ValueError, asyncio.TimeoutError, WebSocketDisconnect):
         pass
 
 

@@ -77,7 +77,8 @@ def _app(name: str, state: AppState, resolver: Any) -> FastAPI:
     async def unhandled(request: Request, exc: Exception) -> JSONResponse:
         # Never leak a traceback to a client; the log has it.
         log.exception("%s: unhandled error on %s %s", name, request.method, request.url.path)
-        return JSONResponse({"detail": "internal error"}, status_code=500)
+        # this handler runs outside the http middleware stack, so add the headers here too
+        return JSONResponse({"detail": "internal error"}, status_code=500, headers=SECURITY_HEADERS)
 
     return app
 

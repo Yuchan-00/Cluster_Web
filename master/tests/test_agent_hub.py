@@ -186,13 +186,50 @@ async def test_protocol_violations_close_after_limit(agent_server, state):
     token = await register(state, "rpi3-01")
     agent = await FakeAgent(agent_server.url, "rpi3-01", token).connect()
     for _ in range(MAX_VIOLATIONS - 1):
-        await agent.send({"type": "cmd_result", "run_id": "never-issued", "status": "ok"})
+        await agent.send({"type": "bogus"})
         await asyncio.sleep(0.01)
+    await wait_for(lambda: state.hub._conns["rpi3-01"].violations == MAX_VIOLATIONS - 1)
     await agent.send(metrics(cpu=1.0))  # still alive
     await wait_for(lambda: state.metrics.latest_sample("rpi3-01") is not None)
-    await agent.send({"type": "bogus"})
+    await agent.send({"type": "cmd_output", "run_id": "x", "stream": "stdout", "data": "x" * 70000})
     assert await agent.closed_with() == 1008
     await wait_for(lambda: not state.nodes.status("rpi3-01").online)
+
+
+async def test_results_for_untracked_runs_are_ignored_not_violations(agent_server, state):
+    """A master restart or a lockdown forgets runs; the agent's late results must not get it
+    kicked (docs/protocol.md 3). Only another node's run id is forgery."""
+    token_a = await register(state, "rpi3-01")
+    token_b = await register(state, "rpi3-02")
+    a = await FakeAgent(agent_server.url, "rpi3-01", token_a).connect()
+    b = await FakeAgent(agent_server.url, "rpi3-02", token_b).connect()
+    for _ in range(MAX_VIOLATIONS + 5):
+        await a.send({"type": "cmd_result", "run_id": "from-before-restart", "status": "ok"})
+        await a.send(
+            {"type": "cmd_output", "run_id": "from-before-restart", "stream": "stdout", "data": "x"}
+        )
+    await asyncio.sleep(0.2)
+    await a.send(metrics(cpu=3.0))
+    await wait_for(lambda: state.metrics.latest_sample("rpi3-01") is not None)
+    conn = state.hub._conns["rpi3-01"]
+    assert conn.violations == 0 and conn.ignored == 2 * (MAX_VIOLATIONS + 5)
+
+    # a run that lockdown finished: the agent's own late result is ignored, B's is a violation
+    run_id = new_run_id()
+    handle = await state.hub.exec("rpi3-01", ExecSpec(run_id=run_id, command="sleep 5"))
+    await a.recv()
+    await state.lockdown.set(True, actor=ACTOR, reason="t")
+    assert (await handle.result).status == "cancelled"
+    await a.recv()  # lockdown
+    await b.recv()
+    assert state.nodes.status("rpi3-01").running_commands == []
+    await a.send({"type": "cmd_result", "run_id": run_id, "status": "cancelled"})
+    await b.send({"type": "cmd_result", "run_id": run_id, "status": "ok"})
+    await wait_for(lambda: state.hub._conns["rpi3-02"].violations == 1)
+    assert state.hub._conns["rpi3-01"].violations == 0
+    await state.lockdown.set(False, actor=ACTOR)
+    await a.close()
+    await b.close()
 
 
 async def test_metrics_extra_is_filtered_and_limited(agent_server, state, config):
@@ -406,3 +443,78 @@ async def test_ui_hub_checks_origin(web_server):
     )
     assert json.loads(await asyncio.wait_for(ws.recv(), 5))["type"] == "hello"
     await ws.close()
+
+
+async def test_revocation_between_handshake_and_hello(agent_server, state):
+    """A connection that authenticated before a revoke/rotate must not be admitted when its
+    hello arrives afterwards (the token is re-checked at admission)."""
+    token = await register(state, "rpi3-01")
+    live = await FakeAgent(agent_server.url, "rpi3-01", token).connect()
+    pre = await FakeAgent(agent_server.url, "rpi3-01", token).connect(send_hello=False)
+    await state.nodes.revoke_token("rpi3-01", actor=ACTOR)
+    assert await live.closed_with() == CLOSE_AUTH
+    await pre.send(hello("rpi3-01"))
+    assert await pre.closed_with() == CLOSE_AUTH
+    assert not state.nodes.status("rpi3-01").online
+    assert "rpi3-01" not in state.hub._conns
+
+    old = await state.nodes.rotate_token("rpi3-01", actor=ACTOR)
+    pre_old = await FakeAgent(agent_server.url, "rpi3-01", old).connect(send_hello=False)
+    new = await state.nodes.rotate_token("rpi3-01", actor=ACTOR)
+    await pre_old.send(hello("rpi3-01"))
+    assert await pre_old.closed_with() == CLOSE_AUTH
+    fresh = await FakeAgent(agent_server.url, "rpi3-01", new).connect()
+    assert fresh.welcome["type"] == "welcome"
+    assert all(a["kind"] != "agent_duplicate" for a in await state.alerts.list(open_only=True))
+    await fresh.close()
+
+
+async def test_concurrent_hellos_admit_exactly_one(agent_server, state, config):
+    token = await register(state, "rpi3-01")
+    first = await FakeAgent(agent_server.url, "rpi3-01", token).connect()
+    state.hub._conns["rpi3-01"].last_message -= 2 * config.agent.metrics_interval_s + 1  # stale
+    c1 = await FakeAgent(agent_server.url, "rpi3-01", token).connect(send_hello=False)
+    c2 = await FakeAgent(agent_server.url, "rpi3-01", token).connect(send_hello=False)
+    await asyncio.gather(c1.send(hello("rpi3-01")), c2.send(hello("rpi3-01")))
+
+    async def outcome(agent):
+        try:
+            return (await agent.recv())["type"]
+        except websockets.ConnectionClosed as exc:
+            return exc.rcvd.code
+
+    outcomes = await asyncio.gather(outcome(c1), outcome(c2))
+    assert sorted(map(str, outcomes)) == sorted(["welcome", str(CLOSE_DUPLICATE)])
+    assert await first.closed_with() == CLOSE_DUPLICATE
+    assert len(state.hub._conns) == 1 and state.nodes.status("rpi3-01").online
+    winner = c1 if outcomes[0] == "welcome" else c2
+    await winner.close()
+    await wait_for(lambda: not state.nodes.status("rpi3-01").online)
+    assert state.hub._conns == {}  # no ghost connection survives
+
+
+async def test_lone_surrogates_are_harmless(agent_server, state, web):
+    token = await register(state, "rpi3-01")
+    agent = await FakeAgent(agent_server.url, "rpi3-01", token).connect(
+        hello_msg=hello("rpi3-01", static_info={"hostname": "x", "weird": "a\udc80b"})
+    )
+    assert agent.welcome["type"] == "welcome"
+    raw = json.dumps(metrics(cpu=5.0)).replace('"junk": "dropped"', '"junk": "\\ud800"')
+    raw = raw.replace('"temp_c": 45.5', '"temp_c": 45.5, "host": "\\udfff"')
+    await agent.send_raw(raw)
+    await wait_for(lambda: state.metrics.latest_sample("rpi3-01") is not None)
+    assert state.hub._conns["rpi3-01"].violations == 0
+    r = await web.get("/api/nodes/rpi3-01")
+    assert r.status_code == 200
+    assert "\ufffd" in r.json()["static_info"]["weird"]
+    assert r.json()["latest"]["data"]["host"] == "\ufffd"
+    await agent.close()
+
+
+async def test_shutdown_does_not_raise_offline_alerts(agent_server, state):
+    token = await register(state, "rpi3-01")
+    agent = await FakeAgent(agent_server.url, "rpi3-01", token).connect()
+    await state.hub.stop()
+    assert await agent.closed_with() == 1001
+    assert all(a["kind"] != "node_offline" for a in await state.alerts.list(open_only=True))
+    await state.hub.start()  # the fixture's stop() expects a running hub

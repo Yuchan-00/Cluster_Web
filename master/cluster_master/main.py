@@ -16,6 +16,7 @@ import signal
 import socket
 import stat
 import sys
+import time
 from collections.abc import Sequence
 
 import uvicorn
@@ -149,9 +150,12 @@ async def serve(cfg: MasterConfig) -> int:
             await housekeeping
         except asyncio.CancelledError:
             pass
-        await state.stop()
+        # 1. tell every agent/browser we are going away, 2. let uvicorn drain the handlers
+        # (they may still write last_seen/alerts), 3. only then flush and close the database.
+        await state.disconnect_all()
         for server, sock in servers:
             await server.shutdown(sockets=[sock])
+        await state.close()
         for listener in (cfg.listeners.internal, cfg.listeners.admin):
             try:
                 os.unlink(listener.path)
@@ -160,10 +164,22 @@ async def serve(cfg: MasterConfig) -> int:
     return 0
 
 
+PRUNE_INTERVAL_S = 24 * 3600.0
+
+
 async def _housekeeping(state: AppState, stop: asyncio.Event) -> None:
-    """Minute rollups and a daily prune; failures are logged and retried next round."""
-    rounds = 0
+    """Minute rollups; retention prune at startup and then daily by the clock (a master that
+    restarts more often than daily would otherwise never prune)."""
+    last_prune = 0.0
     while not stop.is_set():
+        try:
+            if time.time() - last_prune >= PRUNE_INTERVAL_S:
+                removed = await state.metrics.prune()
+                last_prune = time.time()
+                if removed:
+                    log.info("pruned %d metrics_1m row(s) past retention", removed)
+        except Exception:  # noqa: BLE001
+            log.exception("metrics prune failed")
         try:
             await asyncio.wait_for(stop.wait(), ROLLUP_INTERVAL_S)
             return
@@ -171,11 +187,8 @@ async def _housekeeping(state: AppState, stop: asyncio.Event) -> None:
             pass
         try:
             await state.metrics.rollup()
-            rounds += 1
-            if rounds % (24 * 60) == 0:
-                await state.metrics.prune()
         except Exception:  # noqa: BLE001
-            log.exception("housekeeping failed")
+            log.exception("metrics rollup failed")
 
 
 def dev_config(data_dir: str, web_port: int, agent_port: int) -> MasterConfig:

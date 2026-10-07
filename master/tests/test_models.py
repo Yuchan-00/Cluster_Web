@@ -139,3 +139,55 @@ def test_exec_spec_matches_agent_contract():
 
 def test_json_size_counts_utf8_bytes():
     assert json_size({"a": "é"}) == len('{"a":"é"}'.encode())
+
+
+def test_lone_surrogates_are_replaced_everywhere():
+    raw = (
+        '{"type":"metrics","ts":1.0,"data":{"cpu":{"percent":1.0},"na\\udc80me":"a\\udc80b",'
+        '"extra":{"throttled":"\\ud800"}}}'
+    )
+    m = parse_agent_message(raw)
+    for key, value in m.data.items():
+        key.encode("utf-8")
+        json.dumps(value).encode("utf-8")
+    assert m.data["na\ufffdme"] == "a\ufffdb"
+    assert m.extra()["throttled"] == "\ufffd"
+    h = parse_hello(
+        json.dumps(hello("rpi3-01", static_info={"h": "x"})).replace('"x"', '"\\udc80"')
+    )
+    assert json_size(h.static_info) > 0
+
+
+def test_hostile_shapes_are_protocol_errors():
+    with pytest.raises(ProtocolError):
+        parse_agent_message('{"type":"metrics","ts":1,"data":' + "[" * 200 + "]" * 200 + "}")
+    with pytest.raises(ProtocolError):
+        parse_agent_message('{"type":"metrics","ts":1e400,"data":{}}')
+    with pytest.raises(ProtocolError):
+        parse_agent_message('{"type":"metrics","ts":1,"data":{"a":1e999}}')
+    with pytest.raises(ProtocolError):
+        parse_agent_message('{"type":"cmd_result","run_id":"r","status":"ok","exit_code":1e30}')
+    with pytest.raises(ProtocolError):
+        parse_hello(json.dumps(hello("rpi3-01", board="RPI 3")))
+    with pytest.raises(ProtocolError):
+        parse_hello(json.dumps(hello("rpi3-01", agent_version="1.0\nfake log line")))
+
+
+def test_long_reason_is_truncated_not_refused():
+    res = parse_agent_message(
+        json.dumps({"type": "cmd_result", "run_id": "r1", "status": "error", "reason": "x" * 5000})
+    )
+    assert isinstance(res, CmdResult) and len(res.reason) == 512 and res.reason.endswith("...")
+
+
+def test_exec_spec_validates_limits_and_env():
+    spec = ExecSpec(
+        run_id="r", command="x", limits={"memory_mb": 256, "cpu_pct": 50}, env={"CW_A": "1"}
+    )
+    assert spec.to_message()["limits"] == {"memory_mb": 256, "cpu_pct": 50}
+    with pytest.raises(ValueError, match="unknown limits key"):
+        ExecSpec(run_id="r", command="x", limits={"mem_mb": 256})
+    with pytest.raises(ValueError, match="CW_"):
+        ExecSpec(run_id="r", command="x", env={"PATH": "/evil"})
+    with pytest.raises(ValueError):
+        ExecSpec(run_id="r", command="x", root_op="Reboot Now")
