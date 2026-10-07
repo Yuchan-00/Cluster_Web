@@ -216,7 +216,7 @@ sequenceDiagram
 |---|---|---|
 | Agent · execd | Python 3 (**3.8 호환 유지**), `psutil`, `websockets`, `PyYAML` (가능하면 배포판 apt 패키지) | 두 보드 기본 탑재, 빌드 불필요, RDK BPU Python API와 연동 쉬움 |
 | Master · telegram · ai | Python 3.10+, FastAPI, Uvicorn 단일 worker, httpx | async WebSocket, UDS 클라이언트. anthropic SDK 1.x가 3.10 이상 요구. RDK 이미지가 3.8이면 독립 실행형 CPython 3.11(topology.md 5장) |
-| DB | SQLite (WAL) + SQLAlchemy/SQLModel | 별도 서버 불필요, 5대 규모에 충분 |
+| DB | SQLite (WAL), 표준 라이브러리 `sqlite3` + SQL 마이그레이션 파일 (ORM 없음) | 별도 서버 불필요, 5대 규모에 충분. 감사 체인의 `BEGIN IMMEDIATE` 순서를 직접 제어 |
 | 텔레그램 | httpx로 Bot API 직접 호출(약 400줄) | 의존성 최소, 감사 가능, outbox 설계와 1:1 (telegram.md 3.2) |
 | AI | **Claude Code CLI print 모드**를 자식 프로세스로 구동(사용자 구독, `claude setup-token`), `--restricted --tools ""` + 우리 MCP 서버만, `--permission-mode dontAsk`, `--system-prompt-file`, `--max-turns`, `stream-json`. anthropic SDK 직접 호출은 설계로만 보존 | ai-agent.md 0장 |
 | Frontend | React + TypeScript + Vite, Tailwind CSS, uPlot(또는 Chart.js) | 빌드는 CI에서, 클러스터에 Node.js 없음, 외부 CDN 없음(CSP) |
@@ -467,7 +467,7 @@ JSON 메시지, 모든 메시지에 `type` 필드. 토큰은 메시지가 아니
 | `/internal/tg/*` | `telegram-bot` | 연결, outbox lease·결과, 조회, `/run`·`/sh`, 취소, 승인 결정 중계(medium 이상 TOTP), AI 메시지 | telegram.md 3.3 |
 | `/internal/ai/*` | `ai-operator` | 태스크 lease·상태·이벤트·inbox·질문·진행·계획·승인 결과 조회·종료, 정책 조회 | ai-agent.md 2.3 |
 | `/internal/api/*` | `ai-operator` | **명시적 허용 목록**만(읽기 GET, 명령·잡 제출·취소) | security.md 4.1 |
-| `/internal/admin/*` | 콘솔 CLI (peer uid 0) | lockdown, 감사 기록 등 | security.md 13.1·16장 |
+| `/internal/admin/*` | 콘솔 CLI — 별도 UDS `/run/cluster-master/admin.sock` (0600 root) | 노드 등록·토큰, 서비스 토큰, lockdown, 감사 검증 | security.md 4.1·13.1·16장 |
 
 라우트마다 허용 principal을 선언하고 선언이 없으면 기본 거부, 리스너별 라우트 목록은 CI 스냅숏으로 고정한다.
 

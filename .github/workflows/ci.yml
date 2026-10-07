@@ -28,6 +28,45 @@ jobs:
       - name: Test
         run: uv run --locked --python ${{ matrix.python }} --extra dev -- python -m pytest -q -rs
 
+  master:
+    # rdkx3-01 runs Ubuntu 22.04 (3.10); 3.12/3.13 for development machines.
+    name: ${{ matrix.package }} (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [master]
+        python: ["3.10", "3.12", "3.13"]
+    defaults:
+      run:
+        working-directory: ${{ matrix.package }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+      - name: Lint
+        run: uvx ruff@0.16.10 check . && uvx ruff@0.16.10 format --check .
+      - name: Test
+        run: uv run --locked --python ${{ matrix.python }} --extra dev -- python -m pytest -q -rs
+
+  common:
+    # shared by the 3.8 agent and the 3.10 master
+    name: common (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.8", "3.13"]
+    defaults:
+      run:
+        working-directory: common
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+      - name: Lint
+        run: uvx ruff@0.16.10 check . && uvx ruff@0.16.10 format --check .
+      - name: Test
+        run: uv run --locked --python ${{ matrix.python }} --extra dev -- python -m pytest -q -rs
+
   execd-privileged:
     # uid switching, collect attacks and isolation mode A need root and a real systemd,
     # which the runner VM has (docs/design/security.md 11.2, Phase 1 checklist).

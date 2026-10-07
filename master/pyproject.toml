@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cluster-master"
+version = "0.1.0"
+description = "Cluster Web master: node hub, API, approvals, audit log"
+readme = "README.md"
+# rdkx3-01 runs Ubuntu 22.04 (Python 3.10). Nothing newer than 3.10 syntax is used.
+requires-python = ">=3.10"
+dependencies = [
+    "cluster-common",
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    "websockets>=13",
+    "pydantic>=2.7",
+    "PyYAML>=6",
+]
+
+[project.optional-dependencies]
+# cluster-agent: the hub tests drive real (mock) agents in-process
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "httpx>=0.27", "cluster-agent"]
+
+[project.scripts]
+cluster-master = "cluster_master.main:main"
+cluster-master-admin = "cluster_master.cli:main"
+
+[tool.uv.sources]
+cluster-common = { path = "../common", editable = true }
+cluster-agent = { path = "../agent", editable = true }
+
+[tool.setuptools.packages.find]
+include = ["cluster_master*"]
+
+[tool.setuptools.package-data]
+cluster_master = ["migrations/*.sql"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "BLE"]
+ignore = ["S603", "S607"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101", "S105", "S106", "S108", "S311"]
+# FastAPI declares dependencies in parameter defaults
+"cluster_master/api/*" = ["B008"]

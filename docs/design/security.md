@@ -190,13 +190,14 @@ cluster-master는 **Uvicorn 단일 프로세스** 안에서 세 개의 리스너
 |---|---|---|---|
 | web | `127.0.0.1:8000` (HTTP) | `/api/*` 중 **`/api/agent/*` 제외**, `/ws/ui`, SPA 정적 파일 | tailscale serve |
 | agent | `127.0.0.1:8001` (HTTP) | `/ws/agent`, `/api/agent/*`([jobs.md](./jobs.md) 13.4 전체: 번들·항목 다운로드, 아티팩트 업로드) | Caddy (VIP:443 TLS) |
-| internal | UDS `/run/cluster-master/internal.sock` (`cluster-master:cluster-svc`, 0660) | `/internal/tg/*`, `/internal/ai/*`, `/internal/api/*`(아래 허용 목록만), `/internal/admin/*`(콘솔 CLI 전용) | 없음 |
+| internal | UDS `/run/cluster-master/internal.sock` (`cluster-master:cluster-svc`, 0660) | `/internal/tg/*`, `/internal/ai/*`, `/internal/api/*`(아래 허용 목록만) | 없음 |
+| admin | UDS `/run/cluster-master/admin.sock` (`root:root`, 0600) | `/internal/admin/*`(콘솔 CLI 전용) | 없음 |
 
 **internal 리스너 라우트 규칙** (web 라우터를 통째로 마운트하지 않는다):
 
 - `/internal/api/*`에는 **명시적 허용 목록**만 마운트한다: `GET cluster/summary, nodes, nodes/{id}, nodes/{id}/metrics, alerts, presets, commands/{id}, jobs, jobs/{id}, jobs/{id}/tasks, tasks/{id}, attempts/{id}/log, job-templates` 와 `POST commands, commands/{id}/cancel, jobs/validate, jobs, jobs/{id}/cancel`. 승인 결정, 사용자, 노드 등록·토큰, 보안 설정, 감사 로그, AI 정책 라우트는 internal에 존재하지 않는다.
 - 모든 라우트는 **허용 principal 집합**(`user`, `telegram-bot`, `ai-operator`, `cli`)을 데코레이터로 선언해야 하고, 선언이 없으면 기본 거부(403)다. 앱 시작 시 선언 누락 라우트가 있으면 기동을 실패시킨다.
-- `/internal/admin/*`(lockdown on/off, 감사 기록 삽입 등 CLI용)은 `SO_PEERCRED`로 상대 uid가 0일 때만 받는다(13.1, 16장).
+- `/internal/admin/*`(노드 등록·토큰 교체·폐기, 서비스 토큰, lockdown on/off, 감사 검증 등 CLI용)은 **별도 소켓** `admin.sock`(0600 root)에서만 서비스한다. 접근 통제는 커널의 소켓 권한이 하고, 마스터는 소켓을 직접 bind해 0666으로 존재하는 순간이 없게 한다(uvicorn에 맡기면 0666으로 만든 뒤 chmod한다). TCP 상대(`client` 주소가 있는 요청)는 설정 오류로 보고 401. `X-Cli-User` 헤더는 감사 기록의 귀속(sudo 사용자)에만 쓴다(13.1, 16장).
 - CI에서 리스너별 라우트 목록을 스냅숏으로 고정한다. 라우트가 추가되면 스냅숏 갱신이 리뷰 대상이 된다.
 
 - FastAPI의 `/docs`, `/redoc`, `/openapi.json`은 운영 빌드에서 끈다.
@@ -1003,7 +1004,7 @@ CREATE TRIGGER audit_no_delete BEFORE DELETE ON audit_log
 - 기록 대상: 로그인 성공/실패/잠금, step-up, 세션 폐기, 모든 명령·잡 제출과 결과, as_root, 승인 생성·결정·소비, AI 태스크 시작·툴 호출·종료, 노드 등록·토큰, 사용자·역할 변경, 설정 변경, lockdown 발동·해제, 시크릿 교체(값 제외), 무결성 이벤트(중복 연결, 체인 불일치).
 - 트리거는 앱 버그로 인한 수정·삭제를 막는다. DB 파일에 직접 접근한 공격자는 트리거를 지울 수 있으므로 **변조 탐지는 해시 체인과 외부 사본**이 맡는다.
 - UI와 API에 삭제·수정 기능은 없다. 보존 기간이 지난 구간의 정리는 CLI(`cluster-master-admin audit archive --before <date>`)로만 하며, 정리 직전 구간의 마지막 hash를 체크포인트 행으로 남긴다.
-- **체인 직렬화**: 감사 행은 master와 CLI 모두 `BEGIN IMMEDIATE` 트랜잭션 안에서 마지막 `hash`를 읽고 새 행을 계산해 커밋한다. 감사 행은 배치 쓰기(PLAN.md 13장) 대상에서 **제외**하고, master 안에서는 단일 asyncio 큐로 순서대로 넣는다. master가 실행 중이면 콘솔 CLI(`cluster-master-admin`)는 DB에 직접 쓰지 않고 internal UDS의 `/internal/admin/*`(상대 uid 0만, 4.1)를 호출한다. CLI가 DB에 직접 쓰는 것은 master가 멈춘 상태에서만 허용한다(CLI가 `systemctl is-active cluster-master`와 DB 잠금으로 확인).
+- **체인 직렬화**: 감사 행은 master와 CLI 모두 `BEGIN IMMEDIATE` 트랜잭션 안에서 마지막 `hash`를 읽고 새 행을 계산해 커밋한다. 감사 행은 배치 쓰기(PLAN.md 13장) 대상에서 **제외**하고, master 안에서는 단일 asyncio 큐로 순서대로 넣는다. master가 실행 중이면 콘솔 CLI(`cluster-master-admin`)는 DB에 직접 쓰지 않고 admin UDS(`admin.sock`, 0600 root, 4.1)의 `/internal/admin/*`를 호출한다. CLI가 DB에 직접 쓰는 것은 admin.sock에 연결할 수 없을 때(master 중지)만이며, 그때도 같은 `record_sync`를 `BEGIN IMMEDIATE` 안에서 호출해 체인이 이어진다.
 - **canonical JSON**: 키 정렬, 공백 없음, UTF-8, 값은 정수·문자열·불리언·null·배열·객체만(부동소수점 금지, 시각은 정수 ms). 직렬화 함수 버전을 체크포인트 행에 적어 라이브러리 변경으로 인한 오탐을 막는다.
 - 검증: `cluster-master-admin audit verify` (전체 체인 재계산). 매일 1회 타이머로 실행. 실패 시 `alert.raised`(critical, kind `security.audit_chain`) → 텔레그램 즉시 알림 + 웹 상단 배너. **자동 lockdown은 하지 않는다**(오탐이면 장시간 잡·AI 작업이 전부 취소되고, 공격자가 체인을 깨는 것만으로 DoS를 일으킬 수 있음). lockdown 여부는 사람이 판단한다(`/lockdown`).
 
