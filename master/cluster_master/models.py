@@ -19,9 +19,21 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 NODE_ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 RUN_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
-BOARDS = ("rpi3", "rdkx3", "generic")
+BOARDS = ("rpi3", "rdkx3", "odroidn2", "generic")
 # Keys an agent may report under metrics.data.extra (security.md 8.3). Anything else is dropped.
-EXTRA_KEYS = frozenset({"bpu", "throttled", "core_volts", "reboot_required", "isolation_mode"})
+EXTRA_KEYS = frozenset(
+    {
+        "bpu",  # rdkx3: per-core BPU load
+        "throttled",  # rpi3: vcgencmd get_throttled hex string
+        "core_volts",  # rpi3
+        "reboot_required",  # all
+        "isolation_mode",  # all
+        "ddr_temp_c",  # odroidn2: second on-die sensor
+        "cpu_freq_mhz",  # odroidn2: {"little": MHz, "big": MHz}
+        "thermal_throttle",  # odroidn2: cpufreq cooling engaged
+        "emmc_life",  # odroidn2: {"a", "b", "pre_eol"} wear estimates
+    }
+)
 RESULT_STATUSES = (
     "ok",
     "error",

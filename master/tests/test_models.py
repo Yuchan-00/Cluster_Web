@@ -191,3 +191,10 @@ def test_exec_spec_validates_limits_and_env():
         ExecSpec(run_id="r", command="x", env={"PATH": "/evil"})
     with pytest.raises(ValueError):
         ExecSpec(run_id="r", command="x", root_op="Reboot Now")
+
+
+def test_odroid_extra_keys_are_allow_listed():
+    from cluster_master.models import BOARDS, EXTRA_KEYS
+
+    assert "odroidn2" in BOARDS
+    assert {"ddr_temp_c", "cpu_freq_mhz", "thermal_throttle", "emmc_life"} <= EXTRA_KEYS

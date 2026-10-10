@@ -150,7 +150,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--config", default=DEFAULT_PATH)
     parser.add_argument("--once", action="store_true", help="print one sample and exit")
     parser.add_argument("--execd-socket", default=DEFAULT_SOCKET)
-    parser.add_argument("--mock", choices=["rpi3", "rdkx3"], help="simulate a node")
+    parser.add_argument("--mock", choices=["rpi3", "rdkx3", "odroidn2"], help="simulate a node")
     parser.add_argument("--name", help="mock node name")
     parser.add_argument("--master", help="mock: master URL")
     parser.add_argument("--token-file", help="mock: token file")

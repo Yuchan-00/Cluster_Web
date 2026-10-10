@@ -47,8 +47,11 @@ Phase 2 기준 구현 명세. 설계 배경은 `docs/PLAN.md` 12.1, 보안 요�
 - 모든 메시지는 UTF-8 JSON 객체 텍스트 프레임. 바이너리 프레임은 위반.
 - 프레임 ≤ 1 MiB, 연결당 50 msg/s · 1 MiB/s (토큰 버킷, burst = 1초치). 초과 시 `4429`.
 - `metrics`는 2초보다 자주 보낼 수 없다 (더 빠른 것은 버리고 위반 1회).
-- `metrics.data.extra`는 허용 키만 남긴다: `bpu`, `throttled`, `core_volts`, `reboot_required`,
-  `isolation_mode`. 필터 후에도 4 KB 또는 64키를 넘으면 `extra`를 비우고 위반 1회.
+- `metrics.data.extra`는 허용 키만 남긴다(agent·master 양쪽 `EXTRA_KEYS`): `bpu`(rdkx3, 코어별 %),
+  `throttled`(rpi3, `get_throttled` hex 문자열), `core_volts`(rpi3), `reboot_required`, `isolation_mode`,
+  `ddr_temp_c`(odroidn2, DDR 센서 °C), `cpu_freq_mhz`(odroidn2, `{"little": MHz, "big": MHz}`),
+  `thermal_throttle`(odroidn2, bool), `emmc_life`(odroidn2, `{"a","b","pre_eol"}` 또는 null).
+  필터 후에도 4 KB 또는 64키를 넘으면 `extra`를 비우고 위반 1회.
 - `cmd_output.data`는 직렬화 기준 64 KiB 이하.
 - `NaN`/`Infinity`는 JSON이 아니므로 어디에 있어도 위반. 중첩 깊이 32 초과도 위반.
 - JSON 이스케이프(`\udXXX`)로 들어온 짝 없는 UTF-16 서로게이트는 U+FFFD로 바꿔서 받는다(위반 아님):
@@ -79,7 +82,8 @@ Phase 2 기준 구현 명세. 설계 배경은 `docs/PLAN.md` 12.1, 보안 요�
 }
 ```
 
-- `node_id`: `^[a-z0-9][a-z0-9-]{0,62}$`. `board`: `rpi3 | rdkx3 | generic`.
+- `node_id`: `^[a-z0-9][a-z0-9-]{0,62}$`. `board`: `rpi3 | rdkx3 | odroidn2 | generic`
+  (odroidn2의 변종 N2/N2+/N2L은 `static_info.variant`).
 - `board`는 `^[a-z0-9_-]{1,32}$`, `agent_version`은 출력 가능한 ASCII 64자 이하 (로그에 그대로 찍히므로).
 - `static_info`는 **참고 정보**다. 특히 `labels`/`capacity`는 레지스트리의 관리자 설정과 다르면
   경고만 남기고 무시한다 (security.md 8.3). `board`가 등록값과 다르면 `node_board_mismatch` 알림.

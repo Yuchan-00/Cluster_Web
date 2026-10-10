@@ -11,7 +11,7 @@ Design: [docs/PLAN.md](../docs/PLAN.md), [docs/design/security.md](../docs/desig
 
 | Piece | File |
 |---|---|
-| Metrics: psutil, Pi throttling, RDK X3 BPU, mock | `cluster_agent/collectors/` |
+| Metrics: psutil, Pi throttling, RDK X3 BPU, ODROID-N2 thermal/cpufreq/eMMC, mock | `cluster_agent/collectors/` |
 | Labels and capacity (topology.md 1.2) | `cluster_agent/labels.py` |
 | Config with strict validation | `cluster_agent/config.py` |
 | TLS pinned to the internal CA, token in the upgrade header, backoff | `cluster_agent/connection.py` |

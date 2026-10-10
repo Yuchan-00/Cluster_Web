@@ -9,16 +9,20 @@ from .. import __version__
 from .base import Collector, CommandRunner, SysFS, run_command, safe
 from .common import CommonCollector
 from .mock import MockCollector
+from .odroid import OdroidN2Collector
 from .rdkx3 import RdkX3Collector
 from .rpi import RpiCollector
 
-BOARDS = ("auto", "rpi3", "rdkx3", "generic")
+BOARDS = ("auto", "rpi3", "rdkx3", "odroidn2", "generic")
+REAL_BOARDS = ("rpi3", "rdkx3", "odroidn2")
 
 
 def detect_board(sysfs: SysFS) -> str:
     model = sysfs.read("/proc/device-tree/model") or ""
     if "Raspberry Pi" in model:
         return "rpi3"
+    if "ODROID-N2" in model.upper().replace(" ", ""):  # N2, N2Plus, N2L (same SoC, same sysfs)
+        return "odroidn2"
     if sysfs.glob("/sys/devices/system/bpu/bpu*"):
         return "rdkx3"
     lowered = model.lower()
@@ -44,7 +48,7 @@ class MetricsCollector:
     ) -> None:
         sysfs = sysfs or SysFS()
         if mock_name is not None:
-            self.board = board if board in ("rpi3", "rdkx3") else "rpi3"
+            self.board = board if board in REAL_BOARDS else "rpi3"
             self.collectors: List[Collector] = [MockCollector(self.board, mock_name)]
         else:
             self.board = detect_board(sysfs) if board == "auto" else board
@@ -53,6 +57,8 @@ class MetricsCollector:
                 self.collectors.append(RpiCollector(sysfs, run_cmd))
             elif self.board == "rdkx3":
                 self.collectors.append(RdkX3Collector(sysfs, run_cmd))
+            elif self.board == "odroidn2":
+                self.collectors.append(OdroidN2Collector(sysfs))
         self.slow_every = max(1, slow_every)
         self._count = 0
 

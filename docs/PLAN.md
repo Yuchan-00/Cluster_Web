@@ -60,6 +60,7 @@
 | R2 | 추가 요구 | **요청 작업 완료 시 텔레그램 보고** | [telegram.md](./design/telegram.md) 6장. MVP(Phase 5)에 포함 |
 | D7 | RDK X3 RAM | **4GB** (2026-10-07) | topology.md 1.2·6장 용량값 확정 |
 | R4 | 추가 요구 | **AI 사용량은 Claude Code 구독으로** (2026-10-07) | API 키 과금 전제를 바꿈 → [ai-agent.md](./design/ai-agent.md) 0장. 보안 경계(security.md 15장)는 불변 |
+| D8 | 노드 추가 가능성 | **ODROID-N2 계열 2~3대를 추가할 수도 있음** (2026-10-10, 모델·대수·시점 미확정) | 보드 종류 `odroidn2`(N2/N2+/N2L 공통, `variant` 레이블로 구분)를 agent·master에 추가. [topology.md](./design/topology.md) 1.1.1: 보드 사실, **N2+ 4GB + eMMC 권장(N2L 비권장)**, 배치 A(현행)/B(N2+ 2대 이상이면 master를 `odroidn2-01`로) 비교, 용량 기본값 4/0/3328, Phase 0 O-체크리스트. 결정 대기는 21.1 Q20~Q23 |
 | R3 | 추가 요구 | **가능하면 서버의 로컬 에이전트가 자연어 지시 수행** | [ai-agent.md](./design/ai-agent.md): 에이전트 프로세스는 rdkx3-01에서 로컬로, 모델 추론만 Claude API(`claude-opus-5-5`). 보드에서 LLM을 돌리는 것은 비현실적(RAM·BPU 특성)이라 기각. Claude Agent SDK(원시 셸 내장)는 RBAC·승인을 우회하므로 기각하고 우리 API를 감싼 전용 툴만 노출 |
 
 ---
@@ -73,7 +74,9 @@
 | `rdkx3-01` | RDK X3 (4GB) | **master** + worker(축소) | cluster-master, cluster-telegram, cluster-ai, cluster-agent, cluster-execd, Caddy, tailscaled, chrony 서버 | 1 / 1 / 1408 |
 | `rdkx3-02` | RDK X3 | worker(BPU 주력) + master 콜드 스탠바이 | cluster-agent, cluster-execd, tailscaled (master 계열은 설치 후 mask) | 3 / 2 / 2816 |
 | `rpi3-01~03` | Raspberry Pi 3B (1GB) | worker(CPU) | cluster-agent, cluster-execd | 2 / 0 / 384 (잠정) |
+| `odroidn2-01~03` (선택, D8) | ODROID-N2+ (4GB, 6코어 big.LITTLE, 1Gbps, eMMC) | worker(CPU 주력). 배치 B: 01 = master, 02 = 콜드 스탠바이 | cluster-agent, cluster-execd (배치 B: 01에 master 계열) | 4 / 0 / 3328 (master면 1 / 0 / 2432) |
 
+- **ODROID-N2 추가 시**: topology.md 1.1.1의 배치 B(master를 N2+로 이전, RDK X3 둘 다 BPU worker)를 권장한다. agent는 VIP 이름으로 접속하므로 배치 전환은 master 설치 위치와 VIP 소유만 바뀐다. 스위치 포트는 8포트로 부족(Q23).
 - **네트워크**: 기가비트 unmanaged 스위치, 전 노드 유선, DHCP 예약. agent는 물리 호스트가 아니라 VIP 이름 `master.cluster.internal`로 접속한다. 대역은 Phase 0에서 실제 값으로 치환(예시 `192.168.1.0/24`).
 - **Pi 3B 병목**: 이더넷이 USB2 버스를 공유해 실효 약 90Mbps. 큰 데이터는 1Gbps RDK X3 우선, 대용량 전송은 WebSocket 제어 채널이 아닌 별도 HTTPS 경로로.
 - **용량 권위값**: 스케줄러가 쓰는 레이블·용량은 노드 자가 보고가 아니라 admin이 확정한 master 등록값(security.md 8.3).
@@ -256,7 +259,15 @@ sequenceDiagram
 - 종합 상태: `hrut_somstatus` — sysfs 경로를 못 찾을 때 출력 파싱으로 대체
 - RDK X3 경로는 OS 이미지 버전에 따라 다를 수 있다. Phase 0(topology.md 8.1 R1~R3)에서 실기기로 확인한 뒤 확정한다.
 
-collector 구조: `collectors/base.py`(인터페이스 `static_info()`, `collect()`), `common.py`, `rpi.py`, `rdkx3.py`. 보드는 config의 `board`를 우선하고 없으면 `/proc/device-tree/model`로 감지한다. 각 항목은 개별 try/except로 감싸 실패 값은 `null`로 보낸다. master는 `extra`를 허용 키 목록·4KB 상한으로 다시 자른다(security.md 8.3).
+### 7.3b ODROID-N2 계열 전용 (D8, 추가 시)
+
+- **온도 2개**: `/sys/class/thermal/thermal_zone*/type`을 읽어 이름으로 고른다 — CPU(`cpu-thermal` 또는 Hardkernel 4.9의 `soc_thermal`) → `temp_c`, DDR(`ddr-thermal`/`ddr_thermal`) → `extra.ddr_temp_c`. zone 번호는 프로브 순서라 부팅마다 바뀔 수 있다.
+- **클러스터별 클럭**: cpufreq `policy*/related_cpus`로 little(2× A53)/big(4× A73)을 식별하고 `scaling_cur_freq` → `extra.cpu_freq_mhz: {"little": 1896, "big": 2208}`. `cpuinfo_cur_freq`는 root 전용이라 쓰지 않는다.
+- **스로틀링**: 펌웨어 플래그가 없다. cpufreq 쿨링 디바이스(`cooling_device*/type`에 `cpufreq`)의 `cur_state > 0` 또는 `scaling_max_freq < cpuinfo_max_freq` → `extra.thermal_throttle: true`. 스케줄러 필터는 Pi의 throttled 비트와 같은 취급.
+- **eMMC 수명**: `/sys/bus/mmc/devices/<type=MMC>/life_time`(`0x01 0x02`: SLC/MLC 영역 10% 단위 사용량), `pre_eol_info`(1 정상 / 2 경고 / 3 긴급) → `extra.emmc_life: {"a","b","pre_eol"}` (15초 주기). eMMC 4.5 세대 모듈은 값이 없다(`null`). 경고 규칙(7.4): `pre_eol ≥ 2` 또는 `a/b ≥ 0x0A`면 warning.
+- 저전압 텔레메트리(PMIC)는 없어 전원 문제는 보고하지 못한다. 팬 상태(`gpio-fan`/`pwm-fan` cur_state)는 v2.
+
+collector 구조: `collectors/base.py`(인터페이스 `static_info()`, `collect()`), `common.py`, `rpi.py`, `rdkx3.py`, `odroid.py`. 보드는 config의 `board`를 우선하고 없으면 `/proc/device-tree/model`로 감지한다. 각 항목은 개별 try/except로 감싸 실패 값은 `null`로 보낸다. master는 `extra`를 허용 키 목록·4KB 상한으로 다시 자른다(security.md 8.3).
 
 ### 7.4 경고 규칙 (기본값, 설정 가능)
 
@@ -583,7 +594,7 @@ Cluster_Web/
 │   │   ├── execd_client.py         # execd UDS 클라이언트
 │   │   ├── tasks.py                # task_*, 슬롯, 결과 저널, work_request
 │   │   ├── bundle_cache.py
-│   │   └── collectors/             # base, common, rpi, rdkx3
+│   │   └── collectors/             # base, common, rpi, rdkx3, odroid, mock
 │   └── tests/
 ├── execd/                          # root 실행 위임 데몬 (SSH/Ansible로만 배포)
 │   ├── cluster_execd/              # policy, validate, systemd_run, collect, install_bundle, fallback
@@ -742,6 +753,10 @@ flowchart LR
 | Tailscale·IdP 계정 탈취 | IdP MFA, device approval, ACL, 앱 비밀번호 + TOTP가 별도로 필요 |
 | 공급망 | 해시 고정, CI에서만 빌드, 서명 저장소, curl\|bash 금지 |
 | BPU 동시 사용 동작 불명 | Phase 0 확인 후 `bpu_slots` 조정 |
+| ODROID-N2 추가 시 Hardkernel 22.04 이미지(커널 4.9)를 쓰면 cgroup v2 `cpu` 컨트롤러·최신 샌드박스 속성 부재, glibc 커널 버전 거부 전례 | 24.04(6.6) 또는 Armbian(6.18)으로 굽는다(topology.md 5장). Phase 0 O2에서 4.9이면 설치 중단 |
+| ODROID-N2L은 유선 LAN·RTC 없음 | 클러스터 노드로 비권장(topology.md 1.1.1). 쓰더라도 USB 기가비트 NIC + `variant=n2l` 레이블, master 후보 제외 |
+| eMMC 마모(master DB·백업이 eMMC에 있을 때) | `extra.emmc_life` 모니터 + 경고(7.3b), 1분 집계·journald 제한은 SD와 동일 적용, 백업은 다른 노드에 |
+| 노드 8대 + 업링크 > 8포트 스위치 | 16포트 교체 또는 두 번째 스위치(Q23) |
 | 승인 피로 | 위험도 강조, high 일괄 승인 금지, 태스크당 요청 상한, 읽기 진단은 자동 |
 | 1인 개발 범위 과다 | MVP(0~6) 먼저, 잡·AI는 단계별, 효용 낮은 기능(공정성·방해 금지 요약 등)은 v2/나중 |
 
@@ -774,6 +789,10 @@ flowchart LR
 | Q17 | AI | 비용 상한 | **전제 변경**: 모델 사용량을 API 키가 아니라 사용자의 Claude Code 구독으로 처리하기로 함. 달러 상한 대신 구독 한도 안의 사용량(턴·토큰) 상한으로 바꾼다. 가능 여부·방식은 21.2와 [ai-agent.md](./design/ai-agent.md) 0장 |
 | Q18 | AI | `/cancel`의 기본 동작이 그 태스크가 시작한 실행 중 명령·잡까지 취소하는 것으로 맞는지(웹에는 "AI만 중단" 옵션) | 전부 취소 |
 | Q19 | AI | Anthropic 계정·조직 설정에서 API 데이터 보존·학습 사용 정책을 확인하고 받아들일 수 있는지 | 확인 필요 |
+| Q20 | 하드웨어 (D8) | ODROID-N2 계열 **모델과 대수**: N2+ 권장(A73 2.2GHz, 유선 1G, RTC). N2L은 유선 LAN·RTC가 없어 비권장. 2대 vs 3대 | **미확정** (설계는 2~3대, 변종 무관하게 대응) |
+| Q21 | 하드웨어 (D8) | RAM 4GB 변종인지(2GB면 `job_mem_mb` 1280, master 후보 제외), **eMMC 모듈(32GB 이상) 장착** 여부 | **미확정** (설계 기본값 4GB + eMMC) |
+| Q22 | 토폴로지 (D8) | N2+ 2대 이상이면 **master를 `odroidn2-01`로 옮기는 배치 B**(topology.md 1.1.1)를 택할지. RDK X3 두 대를 BPU 전용 worker로 돌리고 master는 더 빠른 CPU·eMMC·RTC 위에 둔다 | **미확정** (권장: B. Phase 6 전까지 결정하면 재작업 없음) |
+| Q23 | 네트워크 (D8) | 노드 8대 + 업링크로 8포트 스위치가 모자람 → 16포트 교체 또는 두 번째 8포트 스위치 | **미확정** |
 
 ### 21.2 이 통합에서 결정한 것 (재확인 불필요)
 
@@ -787,4 +806,4 @@ flowchart LR
 
 ### 21.3 Phase 0·구현 시 확인할 사실 (사용자 결정 아님)
 
-BPU 코어 지정·동시 공유 동작 · 하드닝 속성과 `TemporaryFileSystem`+`BindPaths` 조합의 RDK OS·Pi OS systemd 버전 동작(Ubuntu 24.04에서는 Phase 1 CI로 확인됨, 결과 판정은 유닛 `Result` 사용) · cgroup 컨트롤러 · ION/CMA 예약량 · needrestart 모드 · `journalctl --facility` 지원 · vcgencmd 권한 · Telegram Bot API 한도와 `<pre>` 안 자동 링크 여부 · anthropic SDK 세부(`fallbacks`·최상위 `cache_control` 전달 방식, `strict` 지정, 캐시 수명) · Tailscale과 nftables 공존 · Secure 쿠키의 `http://localhost` 동작.
+ODROID-N2 추가 시(D8): 실제 커널 계열·thermal zone 이름·cpufreq 쿨링 디바이스 이름·eMMC `life_time` 노출·거버너·전력 실측(topology.md 8.1 O1~O14; 2026-10-10 조사 근거: 메인라인 `meson-g12b-odroid-n2*.dts`·`amlogic.yaml`, Hardkernel `odroidg12-4.9.y`/`odroid-6.6.y`, Armbian `odroidn2.conf`, systemd/Ubuntu 릴리스 노트) · BPU 코어 지정·동시 공유 동작 · 하드닝 속성과 `TemporaryFileSystem`+`BindPaths` 조합의 RDK OS·Pi OS systemd 버전 동작(Ubuntu 24.04에서는 Phase 1 CI로 확인됨, 결과 판정은 유닛 `Result` 사용) · cgroup 컨트롤러 · ION/CMA 예약량 · needrestart 모드 · `journalctl --facility` 지원 · vcgencmd 권한 · Telegram Bot API 한도와 `<pre>` 안 자동 링크 여부 · anthropic SDK 세부(`fallbacks`·최상위 `cache_control` 전달 방식, `strict` 지정, 캐시 수명) · Tailscale과 nftables 공존 · Secure 쿠키의 `http://localhost` 동작.

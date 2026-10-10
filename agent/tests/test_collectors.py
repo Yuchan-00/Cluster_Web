@@ -1,6 +1,7 @@
 from cluster_agent.collectors import MetricsCollector, detect_board
 from cluster_agent.collectors.base import SysFS
 from cluster_agent.collectors.common import CommonCollector
+from cluster_agent.collectors.odroid import OdroidN2Collector, detect_variant
 from cluster_agent.collectors.rdkx3 import RdkX3Collector, parse_hrut_somstatus
 from cluster_agent.collectors.rpi import (
     RpiCollector,
@@ -208,3 +209,129 @@ def test_mock_collector_shapes():
     assert len(rdk.collect()["extra"]["bpu"]) == 2
     pi = MetricsCollector(board="rpi3", mock_name="rpi3-01")
     assert pi.collect()["extra"]["throttled"] == "0x0"
+
+
+# -- ODROID-N2 family ----------------------------------------------------------------
+
+
+def _n2_mainline(extra=None):
+    """sysfs as a mainline-based kernel (Hardkernel 6.x, Armbian) lays it out."""
+    files = {
+        "/proc/device-tree/model": "Hardkernel ODROID-N2Plus\x00",
+        # probe order puts DDR first on this boot: zones must be matched by type
+        "/sys/class/thermal/thermal_zone0/type": "ddr-thermal\n",
+        "/sys/class/thermal/thermal_zone0/temp": "41000\n",
+        "/sys/class/thermal/thermal_zone1/type": "cpu-thermal\n",
+        "/sys/class/thermal/thermal_zone1/temp": "52300\n",
+        "/sys/class/thermal/cooling_device0/type": "gpio-fan\n",
+        "/sys/class/thermal/cooling_device0/cur_state": "1\n",
+        "/sys/class/thermal/cooling_device1/type": "cpufreq-cpu0\n",
+        "/sys/class/thermal/cooling_device1/cur_state": "0\n",
+        "/sys/class/thermal/cooling_device2/type": "cpufreq-cpu2\n",
+        "/sys/class/thermal/cooling_device2/cur_state": "0\n",
+        "/sys/devices/system/cpu/cpufreq/policy0/related_cpus": "0 1\n",
+        "/sys/devices/system/cpu/cpufreq/policy0/scaling_cur_freq": "1896000\n",
+        "/sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq": "1896000\n",
+        "/sys/devices/system/cpu/cpufreq/policy0/cpuinfo_max_freq": "1896000\n",
+        "/sys/devices/system/cpu/cpufreq/policy2/related_cpus": "2 3 4 5\n",
+        "/sys/devices/system/cpu/cpufreq/policy2/scaling_cur_freq": "2208000\n",
+        "/sys/devices/system/cpu/cpufreq/policy2/scaling_max_freq": "2208000\n",
+        "/sys/devices/system/cpu/cpufreq/policy2/cpuinfo_max_freq": "2208000\n",
+        "/sys/bus/mmc/devices/mmc1:0001/type": "MMC\n",
+        "/sys/bus/mmc/devices/mmc1:0001/life_time": "0x01 0x02\n",
+        "/sys/bus/mmc/devices/mmc1:0001/pre_eol_info": "0x01\n",
+        "/sys/bus/mmc/devices/mmc0:aaaa/type": "SD\n",
+    }
+    files.update(extra or {})
+    return files
+
+
+def test_detect_variant_strings():
+    assert detect_variant("Hardkernel ODROID-N2") == "n2"
+    assert detect_variant("Hardkernel ODROID-N2Plus") == "n2plus"
+    assert detect_variant("Hardkernel ODROID-N2L") == "n2l"
+    assert detect_variant("Raspberry Pi 3 Model B") is None
+    assert detect_variant(None) is None
+
+
+def test_detect_board_odroid(make_sysfs):
+    for model in ("Hardkernel ODROID-N2", "Hardkernel ODROID-N2Plus\x00", "Hardkernel ODROID-N2L"):
+        assert detect_board(make_sysfs({"/proc/device-tree/model": model})) == "odroidn2"
+
+
+def test_odroid_mainline_layout(make_sysfs):
+    c = OdroidN2Collector(make_sysfs(_n2_mainline()))
+    info = c.static_info()
+    assert info["variant"] == "n2plus"
+    assert info["little_cores"] == 2 and info["big_cores"] == 4
+    assert info["thermal_zone_types"] == {"cpu": "cpu-thermal", "ddr": "ddr-thermal"}
+    assert info["emmc"] is True
+    sample = c.collect()
+    assert sample["temp_c"] == 52.3  # the CPU zone, although it is thermal_zone1 here
+    assert sample["extra"]["ddr_temp_c"] == 41.0
+    assert sample["extra"]["cpu_freq_mhz"] == {"little": 1896, "big": 2208}
+    assert sample["extra"]["thermal_throttle"] is False  # the fan is on, cpufreq is not capped
+    assert c.collect_slow() == {"extra": {"emmc_life": {"a": 1, "b": 2, "pre_eol": 1}}}
+
+
+def test_odroid_detects_throttling(make_sysfs):
+    capped = OdroidN2Collector(
+        make_sysfs(_n2_mainline({"/sys/class/thermal/cooling_device2/cur_state": "3\n"}))
+    )
+    assert capped.collect()["extra"]["thermal_throttle"] is True
+    ceiling = OdroidN2Collector(
+        make_sysfs(
+            _n2_mainline({"/sys/devices/system/cpu/cpufreq/policy2/scaling_max_freq": "1800000\n"})
+        )
+    )
+    assert ceiling.collect()["extra"]["thermal_throttle"] is True
+
+
+def test_odroid_hardkernel_49_layout(make_sysfs):
+    """Hardkernel 4.9 images: soc_thermal/ddr_thermal names, cpufreq_cool devices, no eMMC data."""
+    files = {
+        "/proc/device-tree/model": "Hardkernel ODROID-N2\x00",
+        "/sys/class/thermal/thermal_zone0/type": "soc_thermal\n",
+        "/sys/class/thermal/thermal_zone0/temp": "61000\n",
+        "/sys/class/thermal/thermal_zone1/type": "ddr_thermal\n",
+        "/sys/class/thermal/thermal_zone1/temp": "48000\n",
+        "/sys/class/thermal/cooling_device0/type": "thermal-cpufreq-0\n",
+        "/sys/class/thermal/cooling_device0/cur_state": "2\n",
+        "/sys/devices/system/cpu/cpufreq/policy0/related_cpus": "0-1\n",
+        "/sys/devices/system/cpu/cpufreq/policy0/scaling_cur_freq": "1000000\n",
+        "/sys/devices/system/cpu/cpufreq/policy2/related_cpus": "2-5\n",
+        "/sys/devices/system/cpu/cpufreq/policy2/scaling_cur_freq": "1800000\n",
+        "/sys/bus/mmc/devices/mmc1:0001/type": "MMC\n",  # eMMC 4.5 module: no life_time
+    }
+    c = OdroidN2Collector(make_sysfs(files))
+    assert c.static_info()["variant"] == "n2"
+    sample = c.collect()
+    assert sample["temp_c"] == 61.0 and sample["extra"]["ddr_temp_c"] == 48.0
+    assert sample["extra"]["cpu_freq_mhz"] == {"little": 1000, "big": 1800}
+    assert sample["extra"]["thermal_throttle"] is True
+    assert c.collect_slow() == {"extra": {"emmc_life": None}}
+
+
+def test_odroid_without_sysfs_reports_nulls(make_sysfs):
+    c = OdroidN2Collector(make_sysfs({"/proc/device-tree/model": "Hardkernel ODROID-N2L"}))
+    info = c.static_info()
+    assert info["variant"] == "n2l" and info["emmc"] is False and info["big_cores"] == 0
+    sample = c.collect()
+    assert "temp_c" not in sample
+    assert sample["extra"] == {"ddr_temp_c": None, "cpu_freq_mhz": {}, "thermal_throttle": None}
+
+
+def test_metrics_collector_wires_odroid(make_sysfs):
+    mc = MetricsCollector(board="auto", sysfs=make_sysfs(_n2_mainline()))
+    assert mc.board == "odroidn2"
+    assert [c.name for c in mc.collectors] == ["common", "odroidn2"]
+    info = mc.static_info()
+    assert info["board"] == "odroidn2" and info["variant"] == "n2plus"
+
+
+def test_mock_odroid_profile():
+    mc = MetricsCollector(board="odroidn2", mock_name="odroidn2-01")
+    info = mc.static_info()
+    assert info["cpu_count"] == 6 and info["variant"] == "n2plus" and info["bpu_cores"] is None
+    sample = mc.collect()
+    assert set(sample["extra"]) >= {"ddr_temp_c", "cpu_freq_mhz", "thermal_throttle"}

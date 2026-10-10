@@ -44,7 +44,18 @@ OUTPUT_BYTES_PER_S = 256 * 1024  # serialized bytes; well under the master's 1 M
 OUTPUT_MSGS_PER_S = 30  # master allows 50 messages/s per connection in total
 OUTPUT_PIECE_CHARS = 5000  # <= 30 KB once JSON-escaped (6 bytes/char worst case) < 64 KiB cap
 RUN_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")  # same rule as cluster-execd
-EXTRA_KEYS = ("bpu", "throttled", "core_volts", "reboot_required", "isolation_mode")
+# Must match the master's allow-list (master/cluster_master/models.py EXTRA_KEYS, security.md 8.3).
+EXTRA_KEYS = (
+    "bpu",
+    "throttled",
+    "core_volts",
+    "reboot_required",
+    "isolation_mode",
+    "ddr_temp_c",
+    "cpu_freq_mhz",
+    "thermal_throttle",
+    "emmc_life",
+)
 
 
 class TokenBucket:

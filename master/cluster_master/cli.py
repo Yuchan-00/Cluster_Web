@@ -593,7 +593,7 @@ def build_parser() -> argparse.ArgumentParser:
     node.add_parser("list").set_defaults(fn=cmd_node_list)
     reg = node.add_parser("register")
     reg.add_argument("name")
-    reg.add_argument("--board", required=True, choices=["rpi3", "rdkx3", "generic"])
+    reg.add_argument("--board", required=True, choices=["rpi3", "rdkx3", "odroidn2", "generic"])
     reg.add_argument("--label", action="append", metavar="KEY=VALUE")
     reg.add_argument("--slots", type=int)
     reg.add_argument("--bpu-slots", type=int)

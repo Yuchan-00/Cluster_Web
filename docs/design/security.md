@@ -604,7 +604,7 @@ approvals (
 | 중복 연결 | 같은 노드의 연결이 이미 살아 있으면(마지막 메시지가 `2 × metrics_interval` 이내) **새** 연결을 close 4409로 끊고 `alert.raised`(토큰 탈취 징후). 기존 연결이 그보다 오래 조용하면 죽은 것으로 보고 기존 연결을 4409로 닫고 새 연결을 받는다(알림 없음). 상세는 `docs/protocol.md` 1장 |
 | 스키마 | pydantic 엄격 모델(타입·길이·범위). 알 수 없는 `type`은 버리고 카운트 |
 | 크기 | WebSocket 메시지 최대 1 MiB (`max_size`), 출력 청크 64 KiB |
-| 필드 상한 | `metrics.extra` 직렬화 후 ≤ 4 KB · 키 ≤ 64개 · **허용 목록 키만**(`bpu`, `throttled`, `reboot_required`, `isolation_mode` 등, 목록은 코드 상수) · `sched.running`, `sched.cached_bundles` 배열 길이 ≤ 64, 요소 문자열 ≤ 32자 · `static_info` 직렬화 후 ≤ 16 KB. 초과분은 잘라내고 `rejected_fields` 카운트, 10분 지속 시 `alert.raised`(security.node_input). `metrics_1m.extra` 저장 시에도 같은 상한을 다시 적용 |
+| 필드 상한 | `metrics.extra` 직렬화 후 ≤ 4 KB · 키 ≤ 64개 · **허용 목록 키만**(`bpu`, `throttled`, `core_volts`, `reboot_required`, `isolation_mode`, ODROID-N2용 `ddr_temp_c`, `cpu_freq_mhz`, `thermal_throttle`, `emmc_life`; 목록은 agent·master 양쪽 코드 상수 `EXTRA_KEYS`로 같아야 한다) · `sched.running`, `sched.cached_bundles` 배열 길이 ≤ 64, 요소 문자열 ≤ 32자 · `static_info` 직렬화 후 ≤ 16 KB. 초과분은 잘라내고 `rejected_fields` 카운트, 10분 지속 시 `alert.raised`(security.node_input). `metrics_1m.extra` 저장 시에도 같은 상한을 다시 적용 |
 | 속도 | 연결당 토큰 버킷: 초당 50 메시지·1 MiB/s(버스트 2배). `metrics`는 2초에 1개 이하. 초과 시 drop, 지속되면 close 4429 + 경보 |
 | 메트릭 값 | NaN/Inf/음수/비현실적 값은 null로 |
 | 정적 정보 | hostname 등 문자열은 `[A-Za-z0-9._-]{1,64}`만, 화면의 노드 이름은 **DB에 등록된 이름**을 쓰고 보고된 hostname은 보조 표시(불일치 시 경고) |
@@ -884,6 +884,7 @@ UMask=0077
 | **B. `fallback`** | `systemd-run` 자체를 쓸 수 없음 (Phase 0에서 확인될 때만) | execd가 `setsid` + uid 전환으로 실행, `prlimit --nproc`(fork 상한 = TasksMax 대체) · `--as`, `nice`, OOM 점수, 타이머 | **systemd 샌드박스 전부**(NoNewPrivileges, ProtectSystem, InaccessiblePaths, PrivateTmp). 보호는 DAC(별 uid, 0600 토큰, execd 소켓 그룹)뿐 |
 
 - Pi OS·Ubuntu 22.04는 systemd가 기본이라 모드 B는 예외 상황이다. 대부분의 노드는 "A + memory 컨트롤러 없음"이며 그때도 `TasksMax`·`RuntimeMaxSec`·샌드박스는 적용된다.
+- ODROID-N2 계열(topology.md 1.1.1): Hardkernel 22.04 이미지의 4.9 커널은 cgroup v2에 `cpu` 컨트롤러가 없어 "A + memory 있음 + cpu 없음"(`CPUQuota`/`CPUWeight` 무효)이 된다. 24.04(6.6)·Armbian(6.18)에서는 전부 있으므로 그쪽 이미지를 쓴다(topology.md 5장·O2).
 - 모드 B 노드 요구: (i) `prlimit --nproc` 필수, (ii) Phase 0에서 setuid 바이너리 목록을 감사하고 불필요한 것을 제거([topology.md](./topology.md) 8.1 C9), (iii) **스케줄러는 `shell`/`python` runtime 잡을 모드 B 노드에 배치하지 않는다**([jobs.md](./jobs.md) 5.2 필터 11), (iv) 모드 B 노드 대상 셸 명령·승인 화면에 "격리 저하" 경고, (v) as_root 셸은 모드와 무관하게 9.4 정책을 따른다.
 
 ### 11.3 격리 수준과 한계

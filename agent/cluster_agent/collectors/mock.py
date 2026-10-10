@@ -16,6 +16,12 @@ _PROFILES = {
         "model": "Raspberry Pi 3 Model B (mock)",
         "arch": "aarch64",
     },
+    "odroidn2": {
+        "cores": 6,
+        "mem": 4 * 1024**3,
+        "model": "Hardkernel ODROID-N2Plus (mock)",
+        "arch": "aarch64",
+    },
 }
 
 
@@ -52,6 +58,11 @@ class MockCollector(Collector):
             "interfaces": {"eth0": {"ipv4": ["192.0.2.10"], "mac": "02:00:00:00:00:01"}},
             "python": "mock",
             "bpu_cores": 2 if self.board == "rdkx3" else None,
+            **(
+                {"variant": "n2plus", "little_cores": 2, "big_cores": 4, "emmc": True}
+                if self.board == "odroidn2"
+                else {}
+            ),
         }
 
     def collect(self) -> Dict[str, Any]:
@@ -64,6 +75,10 @@ class MockCollector(Collector):
         extra: Dict[str, Any] = {}
         if self.board == "rdkx3":
             extra["bpu"] = [self.rng.randint(0, 60), self.rng.randint(0, 60)]
+        elif self.board == "odroidn2":
+            extra["ddr_temp_c"] = round(self.temp - 5, 1)
+            extra["cpu_freq_mhz"] = {"little": 1896, "big": 2208 if self.cpu > 50 else 1800}
+            extra["thermal_throttle"] = False
         else:
             extra["throttled"] = "0x0"
         return {

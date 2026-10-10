@@ -223,6 +223,7 @@ as_root: false                 # 잡에서는 v1에 true 불가 (9.6절)
 
 ### 5.1 입력: agent가 광고하는 자원
 
+- big.LITTLE 노드(ODROID-N2 계열, topology.md 1.1.1): `slots`는 big 코어 수(4)다. v1에서는 커널 스케줄러에 맡기고, v2에서 execd가 `odroidn2` 노드의 잡 유닛에 `AllowedCPUs=2-5`(cgroup v2 cpuset, 커널 6.x 이미지 전제)를 걸어 little 코어 2개를 agent·master 몫으로 남긴다. 레이블 `big_cores`가 그 근거다. `extra.thermal_throttle=true`인 노드는 Pi의 throttled 비트와 같이 신규 배치에서 제외한다.
 - 노드 레이블과 용량(`slots`, `bpu_slots`, `job_mem_mb`): **master의 노드 등록 레코드가 권위값**이다. `hello.static_info`의 보고값은 등록 시 기본값 제안과 불일치 경고에만 쓴다 — [topology.md](./topology.md) 1.2절, security.md 8.3.
 - `metrics` (5초): 기존 필드 + 아래 `sched` 블록. **이 메시지가 실행 중 Attempt의 lease 갱신도 겸한다.**
 

@@ -24,6 +24,12 @@ def _default_capacity(board: str, role: str, mem_mb: Optional[int]) -> Dict[str,
         return {"slots": 3, "bpu_slots": 2, "job_mem_mb": 2816 if big else 1024}
     if board == "rpi3":
         return {"slots": 2, "bpu_slots": 0, "job_mem_mb": 384}
+    if board == "odroidn2":
+        # 6 cores (2 little + 4 big), 2GB or 4GB. Slots = big cores; the little cores keep the
+        # OS and the agent responsive. Numbers from topology.md 6.5.
+        if role == "master":
+            return {"slots": 1, "bpu_slots": 0, "job_mem_mb": 2432 if big else 384}
+        return {"slots": 4 if big else 2, "bpu_slots": 0, "job_mem_mb": 3328 if big else 1280}
     generic_mem = 256 if mem_mb is None else max(256, (mem_mb - 1024) // 64 * 64)
     return {"slots": 1, "bpu_slots": 0, "job_mem_mb": generic_mem}
 
@@ -54,6 +60,10 @@ def build_labels(
     }
     if mem_total:
         labels["mem_mb"] = str(int(mem_total // _MB))
+    if static_info.get("variant"):  # odroidn2: n2 | n2plus | n2l
+        labels["variant"] = str(static_info["variant"])
+    if static_info.get("big_cores"):
+        labels["big_cores"] = str(static_info["big_cores"])
     speed = _link_speed(sysfs)
     if speed:
         labels["net_mbps"] = str(speed)

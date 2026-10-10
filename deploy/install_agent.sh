@@ -3,7 +3,7 @@
 #
 #   read -rs T && printf %s "$T" | sudo ./install_agent.sh \
 #       --node-id rpi3-01 --master wss://master.cluster.internal/ws/agent \
-#       --ca ca.pem --token-file - [--board auto|rpi3|rdkx3] [--release DIR] [--force-config]
+#       --ca ca.pem --token-file - [--board auto|rpi3|rdkx3|odroidn2] [--release DIR] [--force-config]
 #
 # The token is accepted on stdin only, so it never appears in argv, shell history or `ps`
 # (docs/design/security.md 20, Phase 1). --release is an unpacked CI release (checksums
@@ -39,7 +39,7 @@ case $MASTER in wss://?*) ;; *) die "--master must be a wss:// URL" ;; esac
 [ -z "$(printf %s "$MASTER" | tr -d 'A-Za-z0-9._~:/?#@!$&()*+,;=%-')" ] \
     || die "--master contains invalid characters"
 [ -f "$CA" ] || die "--ca file not found"
-case $BOARD in auto|rpi3|rdkx3|generic) ;; *) die "invalid --board" ;; esac
+case $BOARD in auto|rpi3|rdkx3|odroidn2|generic) ;; *) die "invalid --board" ;; esac
 [ -d "$RELEASE/wheels" ] && [ -d "$RELEASE/deploy" ] && [ -f "$RELEASE/policy.example.yaml" ] \
     || die "release directory incomplete (wheels/, deploy/, policy.example.yaml)"
 command -v systemd-run >/dev/null || log "WARNING: no systemd-run: execd falls back to mode B"

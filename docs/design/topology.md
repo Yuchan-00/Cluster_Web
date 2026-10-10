@@ -1,6 +1,6 @@
 # 노드 토폴로지와 리소스 예산
 
-> RDK X3 2대 + Raspberry Pi 3B 3대의 역할 배치, 물리/네트워크 구성, 전원·냉각·스토리지·시간 동기화, 노드별 리소스 예산, Phase 0 실기기 확인 절차와 초기 설치 순서를 정의한다.
+> RDK X3 2대 + Raspberry Pi 3B 3대(+ 선택: ODROID-N2 계열 2~3대, 1.1.1절)의 역할 배치, 물리/네트워크 구성, 전원·냉각·스토리지·시간 동기화, 노드별 리소스 예산, Phase 0 실기기 확인 절차와 초기 설치 순서를 정의한다.
 
 **관련 문서**: [PLAN.md](../PLAN.md) · [security.md](./security.md) · [jobs.md](./jobs.md) · [telegram.md](./telegram.md) · [ai-agent.md](./ai-agent.md)
 
@@ -26,8 +26,42 @@
 | `rpi3-01` | Raspberry Pi 3B | 1GB | 100Mbps (USB2 버스 공유) | worker(CPU) | cluster-agent, cluster-execd |
 | `rpi3-02` | Raspberry Pi 3B | 1GB | 100Mbps (USB2 버스 공유) | worker(CPU) | cluster-agent, cluster-execd |
 | `rpi3-03` | Raspberry Pi 3B | 1GB | 100Mbps (USB2 버스 공유) | worker(CPU) | cluster-agent, cluster-execd |
+| `odroidn2-01~03` (선택, 2~3대) | ODROID-N2+ (권장) / N2 | 4GB (2GB 변종 존재) | 1Gbps (N2L은 유선 없음) | worker(CPU 주력). 배치 B에서는 `odroidn2-01`이 master, `odroidn2-02`가 콜드 스탠바이 | cluster-agent, cluster-execd (배치 B: 01에 master 계열 추가, 02에 설치 후 mask) |
 
 Pi 3B는 PoE와 Wake-on-LAN을 지원하지 않는다. 즉 **원격으로 끈 노드는 물리적으로 전원을 다시 꽂아야 켜진다** (PLAN.md 8장의 poweroff 경고 유지). 원격 전원 사이클은 "나중" 단계의 스마트 플러그 확장으로 미룬다.
+
+#### 1.1.1 ODROID-N2 계열을 추가할 때 (2~3대, 미확정)
+
+사용자가 ODROID-N2 계열을 2~3대 추가할 가능성을 열어 두었다(PLAN.md 2장 D8, 21.1 Q20~Q23). 보드 사실(2026-10-10 확인, 출처는 PLAN.md 21.3):
+
+| 항목 | ODROID-N2 (2019) | ODROID-N2+ (2020~) | ODROID-N2L (2022~) |
+|---|---|---|---|
+| SoC | Amlogic S922X Rev.A | S922X Rev.C | S922X Rev.C |
+| CPU | 4× Cortex-A73 1.8GHz + 2× Cortex-A53 1.9GHz (big.LITTLE, 6코어) | A73 2.2GHz(스톡, 2.4 OC) + A53 1.9~2.0GHz | N2+와 같음 |
+| RAM | DDR4 2GB / 4GB | DDR4 2GB / 4GB | LPDDR4 2GB / 4GB |
+| 가속기 | 없음 (Mali-G52 GPU만, NPU 없음) | 같음 | 같음 |
+| 유선 LAN | 1Gbps (RTL8211F) | 1Gbps | **없음** (USB NIC 필요) |
+| USB | 3.0 ×4 + OTG | 같음 | 3.0 ×1 + 2.0 ×1 |
+| 스토리지 | eMMC 모듈 소켓(HS200) + microSD + SPI(Petitboot) | 같음 | eMMC + microSD (SPI 없음) |
+| RTC | PCF8563 (`/dev/rtc0`, 백업 배터리 선택) | 같음 | **없음** |
+| 전원 | DC 5.5/2.1mm 7.5~18V(2022 이후 로트 7.5~16V), **12V 2A 권장**, 유휴 ≈1.6~2.5W / 부하 ≈5.3~6.2W | 같음 | 7.5~16V, 유휴 ≈1.5W / 부하 ≈5.4~6.4W |
+| 냉각 | 대형 패시브 방열판, 5V 2핀 팬 헤더(1.25mm) | 같음(팬 헤더 확정) | 팬 헤더 있음, 방열판은 별도 |
+| 커널의 센서 노출 | 온도 2개(CPU·DDR), 클러스터별 cpufreq(policy0=A53, policy2=A73). zone 이름은 커널 계열에 따라 `cpu-thermal`/`ddr-thermal`(6.x·Armbian) 또는 `soc_thermal`/`ddr_thermal`(Hardkernel 4.9) | 같음 | 같음 |
+
+**권장 모델은 N2+ 4GB + eMMC**다. N2L은 유선 LAN과 RTC가 없어 클러스터 노드로는 권장하지 않는다(USB 기가비트 어댑터로 붙일 수는 있고, agent는 `variant=n2l`로 식별한다). 2GB 변종은 `job_mem_mb`가 1280으로 줄고 master 후보에서 제외한다.
+
+**배치 두 가지.** 노드 역할은 등록 레코드·config의 문제이고 agent는 VIP 이름으로 접속하므로, 두 배치 사이의 전환은 master 설치 위치와 VIP 소유만 바뀐다.
+
+| | 배치 A (현행 유지) | **배치 B (N2+ 2대 이상이면 권장)** |
+|---|---|---|
+| master | `rdkx3-01` (D2) | **`odroidn2-01`** |
+| 콜드 스탠바이 | `rdkx3-02` | **`odroidn2-02`** (같은 보드·같은 이미지 → 5장 "master 후보 둘은 같은 OS" 규칙 충족) |
+| RDK X3 두 대 | 01: master+축소 worker (1/1/1408), 02: BPU worker (3/2/2816) | **둘 다 BPU 주력 worker (3/2/2816)** → BPU 슬롯 3→4 |
+| N2 노드 | worker 4/0/3328 | 01: master+축소 worker 1/0/2432 · 02: worker+스탠바이 4/0/3328 · 03: worker 4/0/3328 |
+| 외부 진입점·VIP·Caddy·chrony 서버·tailscaled | rdkx3-01 | odroidn2-01 (rdkx3-01의 tailscaled는 SSH용으로만) |
+| master DB | rdkx3-01 USB SSD 권장 | odroidn2-01 **eMMC** (USB SSD 불필요, 4.3절) |
+
+B를 권장하는 이유: (1) master 상주 서비스(≈800MB)와 Claude Code CLI(태스크 중 ≤500MB)는 RDK X3의 4× A53 1.2GHz보다 N2+의 4× A73 2.2GHz에서 훨씬 여유가 있다(웹 응답성, AI 태스크 속도). (2) 희소 자원인 BPU를 가진 RDK X3 두 대를 전부 BPU 잡에 쓸 수 있다. (3) SQLite DB·백업 스테이징을 SD/USB SSD 대신 eMMC(수명 추정값 모니터 가능)에 둔다. (4) N2에는 RTC가 있어 부팅 직후 시계 문제(4.4절)가 master에서 사라진다. 비용: Phase 6의 master 설치·VIP·tailscale serve 대상이 바뀐다(설치 스크립트는 호스트 이름만 다르다). **N2 구매 전까지는 배치 A가 유효하고, Phase 2까지의 구현은 어느 배치에도 그대로 쓰인다.** 결정은 PLAN.md 21.1 Q22.
 
 ### 1.2 스케줄러 레이블과 기본 용량
 
@@ -37,13 +71,15 @@ agent는 접속 시 `hello.static_info`에 아래 레이블과 용량을 실어 
 
 | 키 | 값 예 | 출처 | 용도 |
 |---|---|---|---|
-| `board` | `rdkx3` / `rpi3` | config → `/proc/device-tree/model` 자동 감지 | 보드별 대상 지정, collector 선택 |
+| `board` | `rdkx3` / `rpi3` / `odroidn2` | config → `/proc/device-tree/model` 자동 감지 (`Hardkernel ODROID-N2*` → `odroidn2`) | 보드별 대상 지정, collector 선택 |
+| `variant` | `n2` / `n2plus` / `n2l` (odroidn2만) | `/proc/device-tree/model` | 모델별 클럭·포트 차이 표시 |
+| `big_cores` | `4` (odroidn2만) | cpufreq policy의 `related_cpus` | big.LITTLE 노드의 슬롯 산정(= big 코어 수) |
 | `arch` | `aarch64` | `uname -m` | 바이너리/wheel 호환성 (Pi를 32-bit로 바꾸면 `armv7l`) |
 | `bpu` | `2` / `0` | board에서 유도, sysfs로 검증 | BPU 잡 라우팅 |
 | `cpus` | `4` | `os.cpu_count()` | 부하 정규화 |
 | `mem_mb` | 실측 MemTotal | `/proc/meminfo` | 메모리 기반 배치 |
 | `net_mbps` | `1000` / `100` | `/sys/class/net/eth0/speed` | 데이터 이동량 큰 잡의 배치 가중치 |
-| `storage` | `sd` / `ssd` | config | I/O 많은 잡 배치 |
+| `storage` | `sd` / `ssd` / `emmc` | config | I/O 많은 잡 배치 |
 | `node_role` | `master` / `worker` | config | master 보호 (슬롯 축소) |
 | `standby` | `master` (rdkx3-02만) | config | failover 대상 표시 |
 
@@ -60,8 +96,11 @@ agent는 접속 시 `hello.static_info`에 아래 레이블과 용량을 실어 
 | `rdkx3-01` | `board=rdkx3 arch=aarch64 bpu=2 net_mbps=1000 node_role=master storage=ssd*` | 1 | 1 | 1408 |
 | `rdkx3-02` | `board=rdkx3 arch=aarch64 bpu=2 net_mbps=1000 node_role=worker standby=master storage=sd` | 3 | 2 | 2816 |
 | `rpi3-0N` | `board=rpi3 arch=aarch64 bpu=0 net_mbps=100 node_role=worker storage=sd` | 2 | 0 | 384 (잠정) |
+| `odroidn2-0N` worker (4GB) | `board=odroidn2 variant=n2plus arch=aarch64 bpu=0 cpus=6 big_cores=4 net_mbps=1000 node_role=worker storage=emmc` | 4 | 0 | 3328 (6.5절) |
+| `odroidn2-01` master (배치 B) | 위와 같고 `node_role=master` | 1 | 0 | 2432 (6.6절) |
+| `odroidn2-0N` 2GB 변종 | 위와 같고 `mem_mb≈1900` | 2 | 0 | 1280 |
 
-`*` USB SSD를 붙인 경우. `slots`/`job_mem_mb`는 **잡**(큐 경유)에만 적용된다. 즉시 실행되는 **명령**은 슬롯을 차지하지 않고 노드당 동시 실행 상한(PLAN.md 8장, 기본 2)만 따른다. 두 경로 모두 agent의 같은 executor와 같은 실행 계정 `cluster-run`을 쓴다.
+`*` USB SSD를 붙인 경우. ODROID-N2의 `slots=4`는 big 코어(A73) 수다: little 코어 2개는 OS·agent·(배치 B에서는) master 몫으로 남긴다(v2에서 잡 slice에 `AllowedCPUs=2-5`를 걸어 강제, [jobs.md](./jobs.md)). `slots`/`job_mem_mb`는 **잡**(큐 경유)에만 적용된다. 즉시 실행되는 **명령**은 슬롯을 차지하지 않고 노드당 동시 실행 상한(PLAN.md 8장, 기본 2)만 따른다. 두 경로 모두 agent의 같은 executor와 같은 실행 계정 `cluster-run`을 쓴다.
 
 ```yaml
 # /etc/cluster-agent/config.yaml (발췌, rdkx3-02 예)
@@ -79,7 +118,7 @@ capacity:          # 생략 시 board 기본값. 스케줄러는 master 등록�
 
 ### 1.3 노드 증감
 
-- RDK X3는 `rdkx3-0N` → `192.168.1.201~208`, Pi는 `rpi3-0N` → `192.168.1.211~219` 범위에서 추가한다.
+- RDK X3는 `rdkx3-0N` → `192.168.1.201~208`, Pi는 `rpi3-0N` → `192.168.1.211~219`, ODROID-N2 계열은 `odroidn2-0N` → `192.168.1.221~229` 범위에서 추가한다. 호스트명은 변종과 무관하게 `odroidn2-0N`(변종은 `variant` 레이블).
 - 추가: OS 설치 → 9장 설치 순서 → admin이 노드 등록(토큰 발급) → agent 첫 접속 시 보고한 레이블·용량을 admin이 등록 화면에서 확인·확정(step-up) → 스케줄러 후보가 된다.
 - 제거: 노드 토큰 폐기 후 전원 차단. 진행 중이던 잡의 재배치는 [jobs.md](./jobs.md).
 
@@ -106,12 +145,16 @@ flowchart TB
   subgraph P["rpi3-01 ~ 03 · worker"]
     AP["cluster-agent x3"]
   end
+  subgraph N["odroidn2-01 ~ 03 · worker (선택, 1.1.1)"]
+    AN["cluster-agent x2~3"]
+  end
   EXT -- "tailscale serve · 웹" --> M
   TG -- "서비스 토큰 · 내부 API" --> M
   AI -- "서비스 토큰 · 내부 API" --> M
   A1 -- "wss" --> CADDY
   A2 -- "wss" --> CADDY
   AP -- "wss" --> CADDY
+  AN -- "wss" --> CADDY
   CADDY -- "/ws/agent · /api/agent/*" --> M
   M -.->|"cluster-backup.timer 1시간"| BK
 ```
@@ -136,11 +179,12 @@ flowchart LR
   SW ---|"100M"| P1["rpi3-01"]
   SW ---|"100M"| P2["rpi3-02"]
   SW ---|"100M"| P3["rpi3-03"]
+  SW -.-|"1G (선택)"| N1["odroidn2-01~03"]
 ```
 
 | 항목 | v1 결정 | v2 / 나중 |
 |---|---|---|
-| 스위치 | 기가비트 unmanaged 8포트 (노드 5 + 공유기 업링크 1 + 여유 2) | VLAN 지원 managed 스위치로 클러스터를 가정 LAN과 분리 ([security.md](./security.md)) |
+| 스위치 | 기가비트 unmanaged 8포트 (노드 5 + 공유기 업링크 1 + 여유 2). **ODROID-N2를 2대 넘게 추가하면 포트가 모자란다(노드 8 + 업링크 1)** → 16포트로 교체하거나 두 번째 8포트를 업링크로 연결(Q23) | VLAN 지원 managed 스위치로 클러스터를 가정 LAN과 분리 ([security.md](./security.md)) |
 | 케이블 | Cat5e 이상, 전 노드 유선. **Pi 3B의 Wi-Fi/BT는 끈다** (공격 표면·전력 절감) | — |
 | 업링크 | 스위치 ↔ 공유기 1회선 | — |
 | 외부 진입점 | **rdkx3-01 한 곳만**. 공유기 포트포워딩 금지. 방식(VPN/터널)과 정책은 [security.md](./security.md) | — |
@@ -160,7 +204,8 @@ flowchart LR
 | `rpi3-01` | 192.168.1.211 | DHCP 예약 | |
 | `rpi3-02` | 192.168.1.212 | DHCP 예약 | |
 | `rpi3-03` | 192.168.1.213 | DHCP 예약 | |
-| 예비 | .203~.208, .214~.219 | — | 노드 추가용 |
+| `odroidn2-01~03` (선택) | 192.168.1.221~223 | DHCP 예약 | 배치 B에서는 VIP `.200`이 odroidn2-01의 보조 주소 |
+| 예비 | .203~.208, .214~.219, .224~.229 | — | 노드 추가용 |
 
 - **DHCP 예약을 기본**으로 한다(공유기 한 곳에서 관리). 공유기가 예약을 지원하지 않거나 풀 밖 예약을 거부하면 노드 OS에서 정적 IP로 설정한다(RDK OS: netplan 여부 Phase 0 확인 / Pi OS: NetworkManager `nmcli`).
 - `.internal`은 사설 용도로 예약된 최상위 도메인이라 실제 인터넷 이름과 충돌하지 않는다.
@@ -177,6 +222,10 @@ v1은 **모든 노드와 관리 PC에 같은 `/etc/hosts` 블록**을 배포한�
 192.168.1.211  rpi3-01.cluster.internal   rpi3-01
 192.168.1.212  rpi3-02.cluster.internal   rpi3-02
 192.168.1.213  rpi3-03.cluster.internal   rpi3-03
+# 선택 (ODROID-N2 계열 추가 시)
+192.168.1.221  odroidn2-01.cluster.internal odroidn2-01
+192.168.1.222  odroidn2-02.cluster.internal odroidn2-02
+192.168.1.223  odroidn2-03.cluster.internal odroidn2-03
 ```
 
 v2 선택지: 공유기(dnsmasq 지원 시)나 rdkx3-01의 로컬 DNS로 이전. 5대 규모에서는 hosts 파일이 장애 지점이 가장 적다.
@@ -210,7 +259,7 @@ Pi 3B의 이더넷(LAN9514)은 USB2 허브 뒤에 붙어 있어 **USB 포트와 
 master(1Gbps)는 Pi 3대에 동시에 보내도(3 × 100Mbps) 링크가 남으므로 **병목은 각 Pi의 NIC**다. [jobs.md](./jobs.md)가 지켜야 할 토폴로지 제약:
 
 1. **대용량 데이터는 WebSocket 제어 채널로 보내지 않는다.** agent 연결 하나로 heartbeat(metrics)를 겸하므로, 큰 전송이 끼면 15초 offline 판정이 오탐 날 수 있다. 입력/산출물은 별도 HTTP(S) 다운로드/업로드 경로로 분리한다.
-2. **데이터 지역성 가중치**: 입력이 큰 잡(예: 100MB 이상)은 `net_mbps=1000` 노드를 우선하고, Pi에는 "계산은 길고 데이터는 작은" 잡(파라미터 스윕, CPU 배치 처리)을 우선 배치한다.
+2. **데이터 지역성 가중치**: 입력이 큰 잡(예: 100MB 이상)은 `net_mbps=1000` 노드(RDK X3, ODROID-N2)를 우선하고, Pi에는 "계산은 길고 데이터는 작은" 잡(파라미터 스윕, CPU 배치 처리)을 우선 배치한다.
 3. **노드 로컬 캐시**: 같은 입력을 반복 전송하지 않도록 콘텐츠 해시 기반 캐시를 두는 것을 권장(구현은 jobs.md).
 4. Pi에 USB 스토리지를 붙이면 이더넷과 버스를 다투므로 Pi는 SD만 쓴다.
 5. 제어/메트릭 트래픽은 노드당 수 KB/5초 수준이라 무시해도 된다.
@@ -225,6 +274,7 @@ master(1Gbps)는 Pi 3대에 동시에 보내도(3 × 100Mbps) 링크가 남으�
 |---|---|---|---|
 | Pi 3B | micro-USB 5V | **5V 2.5A** 어댑터 (공식 어댑터급) | 얇고 긴 케이블은 전압 강하로 저전압 플래그 유발. 짧고 굵은 케이블 사용. 팬을 GPIO 5V에서 끌어 쓰면 그 전류도 합산 |
 | RDK X3 | Phase 0 확인 (커넥터·전압·전류) | 제조사 문서 기준으로 Phase 0에서 확정 | USB SSD를 붙이는 rdkx3-01은 전력 여유를 더 둔다(필요 시 외부 전원 USB 허브) |
+| ODROID-N2 계열 (선택) | DC 배럴 5.5/2.1mm, 7.5~18V (2022년 이후 로트는 7.5~16V, N2L 7.5~16V) | **12V 2A 어댑터**(Hardkernel 권장) 보드마다 하나, 또는 12V 멀티출력 전원. 유휴 ≈2W, CPU 부하 ≈6W | 5V 멀티포트 USB 충전기로는 못 켠다(USB-C 전원 아님). 2~3대면 총 ≈20W 추가. 팬(5V 0.18A)은 보드 헤더에서 끈다 |
 
 - 멀티포트 USB 충전기를 쓸 경우 **포트당 2.5A 이상을 동시에 보장**하는 제품만 쓴다. Phase 0에서 USB 전력계로 부하 중 전압을 측정하고 `vcgencmd get_throttled`가 `0x0`인지 확인한다.
 - 정전 후 복전 시 전 노드가 자동 부팅되는지 Phase 0에서 확인한다(부팅 순서는 상관없음: agent는 지수 백오프로 재접속).
@@ -232,15 +282,15 @@ master(1Gbps)는 Pi 3대에 동시에 보내도(3 × 100Mbps) 링크가 남으�
 
 ### 4.2 냉각
 
-| 항목 | Pi 3B | RDK X3 |
-|---|---|---|
-| 방열 | 방열판 필수, 장시간 잡이면 팬 | 방열판 + 팬 권장 (BPU 부하 시 발열 큼) |
-| 스로틀링 | 80°C부터 클럭 제한, 85°C 강제 스로틀 (`get_throttled` bit 2·3으로 확인) | trip point를 Phase 0에서 `thermal_zone*/trip_point_*_temp`로 확인 |
-| 경고 | PLAN.md 7.4: 70°C warning / 80°C critical | 동일 |
+| 항목 | Pi 3B | RDK X3 | ODROID-N2 계열 (선택) |
+|---|---|---|---|
+| 방열 | 방열판 필수, 장시간 잡이면 팬 | 방열판 + 팬 권장 (BPU 부하 시 발열 큼) | 기본 대형 패시브 방열판. N2+를 2.2GHz 이상으로 지속 부하하면 Hardkernel 80mm 2핀 팬 권장(N2+ 방열판 전용 마운트) |
+| 스로틀링 | 80°C부터 클럭 제한, 85°C 강제 스로틀 (`get_throttled` bit 2·3으로 확인) | trip point를 Phase 0에서 `thermal_zone*/trip_point_*_temp`로 확인 | 6.x 커널: passive 85°C(cpufreq 제한) · hot 95°C · critical 110°C(커널 종료), 60°C에서 팬 on(gpio-fan). Hardkernel 4.9: 60/65/75°C passive · 95 hot · 110 critical. agent는 `extra.thermal_throttle`(cpufreq 쿨링 cur_state>0 또는 `scaling_max_freq<cpuinfo_max_freq`)로 보고 |
+| 경고 | PLAN.md 7.4: 70°C warning / 80°C critical | 동일 | 동일 (CPU 센서 기준). DDR 센서(`extra.ddr_temp_c`)는 80°C warning |
 
 - 스택형 케이스는 아래→위로 공기가 흐르도록 팬을 한쪽 끝에 둔다.
 - 스케줄러 입력: 온도가 warning 이상이거나 Pi의 스로틀링 비트가 켜진 노드에는 신규 잡을 배치하지 않는 것을 권장(정책 확정은 [jobs.md](./jobs.md)).
-- Phase 0에서 `stress-ng --cpu 4 --timeout 300s`로 5분 부하를 걸어 최고 온도와 스로틀 여부를 기록한다.
+- Phase 0에서 `stress-ng --cpu 4 --timeout 300s`(ODROID-N2는 `--cpu 6`)로 5분 부하를 걸어 최고 온도와 스로틀 여부를 기록한다.
 
 ### 4.3 스토리지
 
@@ -249,6 +299,7 @@ master(1Gbps)는 Pi 3대에 동시에 보내도(3 × 100Mbps) 링크가 남으�
 | `rdkx3-01` | microSD 32GB 이상, A1 이상, High Endurance 계열 | **권장: USB SSD를 `/var/lib/cluster-master`에 마운트** (SQLite DB, 백업 스테이징) | fstab에 UUID + `nofail`, 유닛에 `RequiresMountsFor=/var/lib/cluster-master`. SSD가 없으면 SD에 두고 PLAN.md 13장의 쓰기 절감 규칙에 의존 |
 | `rdkx3-02` | microSD 32GB 이상 | `/var/backups/cluster-master` (암호화 백업 번들, 수십 MB 규모) | failover 시 SD에서 master를 돌리게 되므로 SSD 이동은 선택 |
 | `rpi3-0N` | microSD 16~32GB, A1 이상 | 잡 작업 디렉터리·캐시는 SD | USB 부팅은 이더넷과 버스를 공유하므로 쓰지 않는다 |
+| `odroidn2-0N` (선택) | **eMMC 모듈 32GB 이상** (eMMC 5.0 이상 세대: `life_time`·`pre_eol_info` 수명 추정값을 agent가 `extra.emmc_life`로 보고) | 배치 B의 odroidn2-01: `/var/lib/cluster-master`를 eMMC에 둔다(SSD 불필요). 백업 수신(odroidn2-02)도 eMMC | 부트 셀렉터 스위치는 **MMC** 위치(SPI/Petitboot 경로는 6.x 이미지와 조합이 불확실). eMMC가 없으면 microSD로도 되지만 master 후보에서는 제외. `mmcblk` 번호는 부팅마다 바뀔 수 있으므로 fstab은 UUID, agent는 `/sys/bus/mmc/devices/*/type`으로 식별 |
 
 공통 설정:
 
@@ -268,7 +319,7 @@ RuntimeMaxUse=30M
 
 ### 4.4 시간 동기화
 
-Pi에는 RTC가 없어 부팅 직후 시계가 틀릴 수 있다(Pi OS의 `fake-hwclock`은 마지막 종료 시각만 복원). **시계가 틀리면 wss 인증서 검증과 시간 기반 인증 코드(step-up 인증에 쓰는 경우) 검증이 실패**하므로 시간 동기화는 agent보다 먼저 보장한다.
+Pi에는 RTC가 없어 부팅 직후 시계가 틀릴 수 있다(Pi OS의 `fake-hwclock`은 마지막 종료 시각만 복원). ODROID-N2/N2+에는 PCF8563 RTC(`/dev/rtc0`)가 있어 백업 배터리(별매 팩, 1.25mm 2핀)를 달면 전원이 끊겨도 시각이 유지된다(배치 B에서 master의 시계 문제가 사라지는 이유). N2L에는 RTC가 없다. **시계가 틀리면 wss 인증서 검증과 시간 기반 인증 코드(step-up 인증에 쓰는 경우) 검증이 실패**하므로 시간 동기화는 agent보다 먼저 보장한다.
 
 | 노드 | chrony 설정 |
 |---|---|
@@ -288,6 +339,7 @@ Pi에는 RTC가 없어 부팅 직후 시계가 틀릴 수 있다(Pi OS의 `fake-
 | RDK X3 (두 대 모두) | **Ubuntu 22.04 기반 RDK OS, server(데스크톱 없는) 구성** | 기본 Python 3.10 → master를 별도 Python 빌드 없이 실행. rdkx3-02도 master 후보이므로 **두 대 모두 같은 22.04 계열 이미지**여야 한다 | 이미지 버전, 커널 버전, 데스크톱 비활성 가능 여부(`systemctl set-default multi-user.target`), 벤더 apt 저장소의 BSP 업데이트 방식 |
 
 **Python < 3.10 대비 (C3)**: master·cluster-telegram·cluster-ai는 Python 3.10 이상이 필수다(anthropic SDK 1.x 요구). Phase 0에서 RDK X3 이미지가 20.04 계열(Python 3.8)로 확인되고 22.04 계열을 쓸 수 없으면, `/opt/cluster-web/python`에 **aarch64용 독립 실행형 CPython 3.11 빌드**를 CI 릴리스 산출물로 포함하고(`SHA256SUMS`로 검증, [security.md](./security.md) 17장) 그 위에 venv를 만든다. agent·execd는 시스템 `python3`(≥3.8)을 그대로 쓴다.
+| ODROID-N2 계열 (선택) | **Hardkernel Ubuntu 24.04 Minimal (커널 6.6, Python 3.12, systemd 255)** 또는 **Armbian(N2/N2+는 standard support, 메인라인 6.18 계열)**. Hardkernel 22.04 이미지(커널 4.9.312)는 쓰지 않는다 | 4.9 커널은 cgroup v2 `cpu` 컨트롤러가 없어 `CPUQuota`/`CPUWeight`가 동작하지 않고(memory는 됨), glibc 2.35+가 4.9.3xx 커널 버전 문자열을 거부한 전례가 있으며, Hardkernel도 24.04는 업그레이드가 아닌 새로 굽기를 요구한다. 6.6/6.18에서는 cgroup v2 전체·`TemporaryFileSystem` 등 샌드박스 속성이 모두 있다. Python ≥3.10이라 master 후보가 된다 | 커널 버전(O2), thermal zone 이름(O2), cgroup 컨트롤러(C5~C7), N2L이면 USB NIC 드라이버(O12) |
 | Pi 3B | **Raspberry Pi OS Lite 64-bit** (릴리스는 Phase 0 시점의 현행 안정판) | 클러스터 전체가 `arch=aarch64` 하나로 통일 → 잡 바이너리/wheel 한 벌, 스케줄러의 arch 분기 불필요. 64-bit가 Pi 3 계열 Imager 기본 | 64-bit의 메모리 오버헤드 실측 |
 
 **Pi 3B 64-bit 트레이드오프**: 포인터가 8바이트라 Python처럼 객체가 많은 프로세스는 32-bit 대비 RSS가 대략 10~20% 늘어난다. 1GB에서는 이 차이가 잡 할당량을 수십 MB 줄인다. Phase 0에서 agent RSS가 45MB를 넘거나 잡 OOM이 잦으면 32-bit(armhf)로 바꾸고 `arch=armv7l` 레이블로 구분한다(스케줄러는 arch 레이블을 존중해야 함).
@@ -370,7 +422,37 @@ failover로 master가 되면 6.2 표를 그대로 적용하고 `node_role=master
 
 ---
 
+### 6.5 odroidn2-0N worker (선택, 4GB)
+
+| 항목 | 목표 |
+|---|---|
+| MemTotal | ≈3.8GB (CMA 예약 소량), Phase 0 실측(O6) |
+| OS 기본 (Ubuntu 24.04 minimal, sshd/journald/chrony) | ≈250MB |
+| cluster-agent | ≤40MB, CPU <3% |
+| cluster-execd (실행당 25MB × slots 4 + 명령 2) | ≈150MB (실측) |
+| 여유분 | 300MB |
+| 잡 할당 | **3328MB** (4096 − 250 − 40 − 150 − 300 = 3356 → 64MB 내림. 2GB 변종: 1280) |
+| CPU | `slots=4` = big 코어 수. v2: 잡 slice `AllowedCPUs=2-5` |
+
+### 6.6 odroidn2-01 master (배치 B일 때)
+
+6.2 표의 상주 서비스를 그대로 적용한다(합계 ≈800MB + AI 태스크 중 ≤500MB). BPU 예약 메모리가 없고 CPU가 빠르므로 여유가 더 크다.
+
+| 항목 | 목표 |
+|---|---|
+| 상주 합계 (6.2 표, execd 25MB × (slots 1 + 명령 2) 포함) | ≈800MB |
+| Claude Code CLI (태스크 중) | ≤500MB |
+| 여유분 | 300MB |
+| 잡 할당 | **2432MB** (4096 − 800 − 500 − 300 = 2496 → 64MB 내림) |
+| CPU | cluster-master `CPUWeight=200`, 잡 slice `CPUWeight=50` + v2 `AllowedCPUs=2-5`. little 코어 2개는 master·agent 몫 |
+
+이 배치에서 rdkx3-01은 6.3 표(worker, 3/2/2816)로 바뀐다.
+
+---
+
 ## 7. rdkx3-02 콜드 스탠바이
+
+배치 B(1.1.1)에서는 이 장의 `rdkx3-01`을 `odroidn2-01`, `rdkx3-02`를 `odroidn2-02`로 읽는다(백업 수신 디렉터리는 odroidn2-02의 eMMC). 절차는 동일하다.
 
 **자동 HA(자동 failover, 합의 기반 리더 선출, 실시간 DB 복제)는 범위 밖이다.** 5대 가정용 클러스터에서 split-brain 위험과 복잡도가 이득보다 크다. 목표는 "rdkx3-01이 죽어도 30분 안에 손으로 되살린다"이다.
 
@@ -500,6 +582,25 @@ notifier·outbox·cluster-telegram이 모두 rdkx3-01에 있으므로 **rdkx3-01
 | R11 | 기본 계정 | `getent passwd \| awk -F: '$3>=1000 \|\| $3==0'` | 이미지 기본 계정 확인 → 즉시 처리([security.md](./security.md)) |
 | R12 | 부하 시 열 | `stress-ng --cpu 4 --timeout 300s` 중 R3 경로 5초 간격 기록 | 최고 온도 |
 
+**ODROID-N2 계열 (추가하는 경우, 각 노드)**
+
+| # | 확인 항목 | 명령 | 기대/판단 |
+|---|---|---|---|
+| O1 | 모델·변종 | `tr -d '\0' < /proc/device-tree/model; echo` | `Hardkernel ODROID-N2` / `ODROID-N2Plus` / `ODROID-N2L` → agent `variant` 레이블. `compatible`은 4.9 커널에서 `amlogic, g12b`만 있으므로 쓰지 않음 |
+| O2 | 커널 계열과 thermal zone 이름 | `uname -r; grep . /sys/class/thermal/thermal_zone*/type` | 6.x: `cpu-thermal`/`ddr-thermal`, 4.9: `soc_thermal`/`ddr_thermal`. **4.9이면 24.04 이미지로 새로 굽는다**(5장). zone 번호는 부팅마다 바뀔 수 있으므로 이름으로 기록 |
+| O3 | cpufreq 클러스터 | `for p in /sys/devices/system/cpu/cpufreq/policy*; do echo "$p $(cat $p/related_cpus) max=$(cat $p/cpuinfo_max_freq) gov=$(cat $p/scaling_governor)"; done` | `policy0 = 0 1`(A53), `policy2 = 2 3 4 5`(A73). N2+: 1896000/2208000kHz(메인라인은 A53 1800000). 거버너는 performance 또는 schedutil(4.9의 ondemand는 멈춤 보고 있음) |
+| O4 | 쿨링 디바이스 | `for c in /sys/class/thermal/cooling_device*; do echo "$c $(cat $c/type) $(cat $c/cur_state)/$(cat $c/max_state)"; done` | cpufreq 쿨러 이름(`cpufreq-cpu0`/`cpufreq-cpu2` 또는 `thermal-cpufreq-N`)과 팬(`gpio-fan`/`pwm-fan`) 확인 → agent `thermal_throttle` fixture |
+| O5 | trip point | `grep . /sys/class/thermal/thermal_zone*/trip_point_*_type /sys/class/thermal/thermal_zone*/trip_point_*_temp` | 6.x: passive 85000 / hot 95000 / critical 110000 (+active 60000 팬). 4.2절 표와 대조 |
+| O6 | 메모리·CMA | `free -m; grep -E 'MemTotal\|CmaTotal' /proc/meminfo` | 6.5절 공식 입력. 2GB 변종이면 용량표의 2GB 행 적용 |
+| O7 | eMMC 식별·수명 | `for d in /sys/bus/mmc/devices/*; do echo "$d $(cat $d/type) $(cat $d/name 2>/dev/null) life=$(cat $d/life_time 2>/dev/null) eol=$(cat $d/pre_eol_info 2>/dev/null)"; done; lsblk -o NAME,SIZE,MODEL,TRAN` | `type=MMC`가 eMMC. `life_time`은 eMMC 5.0+ 모듈만 있음(0x01=0~10% 사용 … 0x0B=초과, `pre_eol_info` 1 정상/2 경고/3 긴급). 어느 `mmcblk`가 eMMC인지 기록(부팅마다 바뀔 수 있음) |
+| O8 | 부트 스위치 | 보드의 SPI/MMC 셀렉터 위치 확인 | **MMC**. 위치를 바꾼 뒤에는 전원을 완전히 뺀 뒤 다시 켠다(전원 인가 시점에만 읽음) |
+| O9 | RTC | `ls /dev/rtc*; cat /sys/class/rtc/rtc0/name; sudo hwclock -r` | N2/N2+: `rtc-pcf8563`, 배터리 팩 유무 기록. N2L: `meson-vrtc`만(배터리 없음) → chrony 의존 |
+| O10 | 팬 헤더·부하 열 | 팬 연결 여부; `stress-ng --cpu 6 --timeout 300s` 중 O2의 두 zone 온도와 O4의 cur_state를 5초 간격 기록 | 패시브만으로 85°C passive trip에 닿는지, 60°C에서 팬이 켜지는지 |
+| O11 | 전원 | DC 잭 쪽에서 전력계로 유휴/부하 측정 | ≈2W / ≈6W. 어댑터 12V 2A 확인 |
+| O12 | 네트워크 | `cat /sys/class/net/e*/speed; ip -br link` (N2L: `lsusb; ethtool <usb nic>`) | N2/N2+ 1000. N2L은 USB NIC 드라이버·속도 기록 |
+| O13 | Python·systemd | `python3 --version; systemd --version \| head -1` | 24.04: 3.12 / 255. master 후보 조건(≥3.10) |
+| O14 | sysfs 읽기 권한 | `sudo -u cluster-agent cat /sys/class/thermal/thermal_zone0/temp /sys/devices/system/cpu/cpufreq/policy0/scaling_cur_freq /sys/bus/mmc/devices/*/life_time` | 모두 비root로 읽혀야 함(`cpuinfo_cur_freq`는 root 전용이라 agent는 쓰지 않음) |
+
 ### 8.2 결과 기록 양식
 
 노드마다 `docs/phase0/<hostname>.md`로 남긴다(collector fixture와 6장 예산 재계산의 근거).
@@ -540,15 +641,15 @@ flowchart LR
 
 | 단계 | 내용 | 대상 |
 |---|---|---|
-| 1. OS 굽기 | Pi: Raspberry Pi Imager에서 Lite 64-bit, 호스트명·**기본 아닌 사용자 이름**·SSH 공개키·시간대 미리 설정, Wi-Fi 미설정. RDK X3: 22.04 계열 RDK OS 이미지를 SD에 굽고 첫 부팅 시 **이미지 기본 계정 비밀번호를 즉시 변경/잠금**(R11) | 전체 |
+| 1. OS 굽기 | Pi: Raspberry Pi Imager에서 Lite 64-bit, 호스트명·**기본 아닌 사용자 이름**·SSH 공개키·시간대 미리 설정, Wi-Fi 미설정. RDK X3: 22.04 계열 RDK OS 이미지를 SD에 굽고 첫 부팅 시 **이미지 기본 계정 비밀번호를 즉시 변경/잠금**(R11). ODROID-N2: 24.04 Minimal(6.6) 또는 Armbian 이미지를 **eMMC**에 굽고(USB 리더 또는 SD로 부팅 후 dd), 부트 스위치 MMC(O8), 첫 부팅 시 기본 계정 처리 | 전체 |
 | 2. 호스트명·IP | `sudo hostnamectl set-hostname rpi3-01`, MAC 확인(`ip link`) 후 공유기 DHCP 예약, `deploy/hosts.cluster`를 `/etc/hosts`에 반영. 관리 PC hosts에도 추가 | 전체 |
 | 3. SSH 키 | 관리 PC에서 `ssh-keygen -t ed25519` → `ssh-copy-id <user>@rpi3-01`. 키 로그인 확인 후 비밀번호 로그인 차단은 7단계에서 | 전체 |
 | 4. 업데이트 | `sudo apt update && sudo apt full-upgrade -y && sudo reboot`. RDK X3는 벤더 BSP/커널 패키지 업데이트 방식 확인 후 적용(C2·R8) | 전체 |
 | 5. 시간 동기화 | `sudo apt install -y chrony`, 4.4절 설정, time-sync 대기 유닛 enable(C18) | 전체 |
-| 6. 보드 설정 | Pi: `config.txt`에 `gpu_mem=16`, `dtoverlay=disable-wifi`, `dtoverlay=disable-bt`, 필요 시 cmdline `cgroup_enable=memory`, zram. RDK X3: `systemctl set-default multi-user.target`(데스크톱 비활성). 공통: journald 제한(4.3절), `noatime`. rdkx3-01: USB SSD 마운트 | 보드별 |
+| 6. 보드 설정 | Pi: `config.txt`에 `gpu_mem=16`, `dtoverlay=disable-wifi`, `dtoverlay=disable-bt`, 필요 시 cmdline `cgroup_enable=memory`, zram. RDK X3: `systemctl set-default multi-user.target`(데스크톱 비활성). ODROID-N2: 거버너 확인(O3), 팬 연결, RTC 배터리 팩(선택), `config.ini`/`boot.ini`의 `max_freq_*`는 스톡 유지(오버클럭 금지). 공통: journald 제한(4.3절), `noatime`. rdkx3-01(배치 A): USB SSD 마운트 | 보드별 |
 | 7. 보안 하드닝 | 방화벽, SSH 설정, 불필요 서비스 제거, 계정, 외부 접속 경로 → **[security.md](./security.md)** | 전체 |
 | 8. Phase 0 기록 | 8장 체크리스트 실행, `docs/phase0/<hostname>.md` 작성, 6장 예산과 1.2절 용량 재계산 | 전체 |
-| 9. master 설치 | rdkx3-01: `install_master.sh`, `cluster-vip` enable, 내부 인증서, master 계열 서비스 enable. rdkx3-02: 같은 패키지를 설치하고 master 계열 서비스 mask, `cluster-backup` 수신 계정 생성, 첫 백업 복제 확인 | rdkx3-01, rdkx3-02 |
+| 9. master 설치 | rdkx3-01: `install_master.sh`, `cluster-vip` enable, 내부 인증서, master 계열 서비스 enable. rdkx3-02: 같은 패키지를 설치하고 master 계열 서비스 mask, `cluster-backup` 수신 계정 생성, 첫 백업 복제 확인. **배치 B면 두 호스트를 odroidn2-01/odroidn2-02로 바꿔 읽는다** | master와 스탠바이 |
 | 10. agent 설치 | admin이 웹에서 노드 등록(step-up) → 토큰 1회 표시 → 노드에서 `read -rs T && printf %s "$T" \| sudo ./install_agent.sh --node-id <호스트명> --master wss://master.cluster.internal/ws/agent --ca ca.pem --token-file -` (토큰은 **stdin으로만**: 셸 히스토리·`ps`·`/proc/*/cmdline`에 남지 않게, [security.md](./security.md) 12.1). 계정(`cluster-agent`, `cluster-run`) 생성, cluster-execd·policy.yaml 설치, 권한 설정은 설치 스크립트가 security.md 규칙대로 수행. 첫 접속 후 웹에서 레이블·용량 확정(1.2절). Pi는 P7 재확인 | 전체 (rdkx3-01 포함) |
 
-완료 기준: 5대 모두 대시보드에 online, 레이블/용량이 1.2절과 일치, 전체 재부팅 후 자동 복귀, rdkx3-02에 암호화 백업이 1시간 주기로 쌓임.
+완료 기준: 전 노드(5대, N2 추가 시 7~8대)가 대시보드에 online, 레이블/용량이 1.2절과 일치, 전체 재부팅 후 자동 복귀, 스탠바이 노드에 암호화 백업이 1시간 주기로 쌓임.

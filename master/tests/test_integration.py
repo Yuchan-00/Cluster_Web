@@ -22,6 +22,7 @@ NODES = [
     ("rpi3-01", "rpi3"),
     ("rpi3-02", "rpi3"),
     ("rpi3-03", "rpi3"),
+    ("odroidn2-01", "odroidn2"),
 ]
 
 
@@ -55,7 +56,7 @@ async def test_mock_cluster(agent_server, state, web, caplog):
         agents.append(agent)
         tasks.append(asyncio.create_task(agent.run_forever(), name=f"agent-{name}"))
     try:
-        await wait_for(lambda: len(state.nodes.online_ids()) == 5, timeout=15)
+        await wait_for(lambda: len(state.nodes.online_ids()) == len(NODES), timeout=15)
         await wait_for(
             lambda: all(state.metrics.latest_sample(n) is not None for n, _ in NODES), timeout=15
         )
@@ -70,6 +71,12 @@ async def test_mock_cluster(agent_server, state, web, caplog):
         assert by_id["rpi3-01"]["labels"] == {}
         assert any("labels" in w for w in by_id["rpi3-01"]["warnings"])
         assert by_id["rpi3-01"]["static_info"]["isolation"] == "mock"
+        n2 = by_id["odroidn2-01"]
+        assert n2["static_info"]["variant"] == "n2plus" and n2["static_info"]["cpu_count"] == 6
+        assert n2["latest"]["bpu"] is None
+        extra = state.metrics.latest("odroidn2-01")["data"]["extra"]
+        assert set(extra) == {"ddr_temp_c", "cpu_freq_mhz", "thermal_throttle"}  # allow-listed
+        assert extra["cpu_freq_mhz"]["little"] == 1896
 
         # a real command through the agent's executor
         run_id = new_run_id()
@@ -114,7 +121,7 @@ async def test_mock_cluster(agent_server, state, web, caplog):
 
         # stopping the agents takes the nodes offline
         await asyncio.gather(*(a.stop() for a in agents[:2]))
-        await wait_for(lambda: len(state.nodes.online_ids()) == 3, timeout=10)
+        await wait_for(lambda: len(state.nodes.online_ids()) == len(NODES) - 2, timeout=10)
 
         async def _offline_alerts() -> set[str]:
             alerts = await state.alerts.list(open_only=True)

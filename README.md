@@ -1,6 +1,6 @@
 # Cluster Web
 
-RDK X3 2대와 Raspberry Pi 3B 3대로 구성한 클러스터를 관리하는 웹 서비스입니다. 노드 상태를 실시간으로 모니터링하고, 웹과 텔레그램에서 명령을 내리고, 분산 작업을 실행합니다. 작업이 끝나면 텔레그램으로 보고하고, master의 AI 에이전트가 자연어 지시를 사람 승인 아래에서 수행합니다. 보안을 최우선으로 설계했습니다.
+RDK X3 2대와 Raspberry Pi 3B 3대(선택: ODROID-N2 계열 2~3대 추가)로 구성한 클러스터를 관리하는 웹 서비스입니다. 노드 상태를 실시간으로 모니터링하고, 웹과 텔레그램에서 명령을 내리고, 분산 작업을 실행합니다. 작업이 끝나면 텔레그램으로 보고하고, master의 AI 에이전트가 자연어 지시를 사람 승인 아래에서 수행합니다. 보안을 최우선으로 설계했습니다.
 
 - 마스터 계획서: [docs/PLAN.md](docs/PLAN.md)
 - 세부 설계: [topology](docs/design/topology.md) · [security](docs/design/security.md) · [jobs](docs/design/jobs.md) · [telegram](docs/design/telegram.md) · [ai-agent](docs/design/ai-agent.md)

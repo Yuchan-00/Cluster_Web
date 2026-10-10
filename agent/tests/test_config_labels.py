@@ -98,6 +98,9 @@ def test_link_down_speed_ignored(make_sysfs):
         ("rdkx3", "worker", 3800, {"slots": 3, "bpu_slots": 2, "job_mem_mb": 2816}),
         ("rdkx3", "master", 1900, {"slots": 1, "bpu_slots": 1, "job_mem_mb": 384}),
         ("rdkx3", "master", 3800, {"slots": 1, "bpu_slots": 1, "job_mem_mb": 1408}),
+        ("odroidn2", "worker", 3800, {"slots": 4, "bpu_slots": 0, "job_mem_mb": 3328}),
+        ("odroidn2", "worker", 1900, {"slots": 2, "bpu_slots": 0, "job_mem_mb": 1280}),
+        ("odroidn2", "master", 3800, {"slots": 1, "bpu_slots": 0, "job_mem_mb": 2432}),
     ],
 )
 def test_default_capacity_matches_topology_table(board, role, mem_mb, expected):
@@ -114,3 +117,18 @@ def test_configured_capacity_wins():
 def test_trailing_newline_rejected(node_id):
     with pytest.raises(ConfigError, match="node_id"):
         parse_config({**BASE, "node_id": node_id})
+
+
+def test_odroid_labels_carry_variant_and_big_cores(make_sysfs):
+    info = {
+        "arch": "aarch64",
+        "cpu_count": 6,
+        "mem_total": 4 * 1024**3,
+        "variant": "n2plus",
+        "big_cores": 4,
+    }
+    labels = build_labels("odroidn2", info, {}, make_sysfs({}))
+    assert labels["board"] == "odroidn2" and labels["variant"] == "n2plus"
+    assert labels["big_cores"] == "4" and labels["cpus"] == "6" and labels["bpu"] == "0"
+    cap = build_capacity("odroidn2", labels, {})
+    assert cap == {"slots": 4, "bpu_slots": 0, "job_mem_mb": 3328}

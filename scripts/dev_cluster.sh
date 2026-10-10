@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Development cluster: one master in --dev mode + five mock agents, all on loopback.
+# Development cluster: one master in --dev mode + six mock agents (2 RDK X3, 3 Pi 3B, 1 ODROID-N2+), all on loopback.
 #
 #   scripts/dev_cluster.sh            # start (Ctrl-C stops everything)
 #   DEV_DIR=/tmp/cw scripts/dev_cluster.sh
@@ -12,7 +12,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DEV_DIR="${DEV_DIR:-$ROOT/.dev-cluster}"
 WEB_PORT="${WEB_PORT:-8000}"
 AGENT_PORT="${AGENT_PORT:-8001}"
-NODES=("rdkx3-01:rdkx3" "rdkx3-02:rdkx3" "rpi3-01:rpi3" "rpi3-02:rpi3" "rpi3-03:rpi3")
+NODES=("rdkx3-01:rdkx3" "rdkx3-02:rdkx3" "rpi3-01:rpi3" "rpi3-02:rpi3" "rpi3-03:rpi3" "odroidn2-01:odroidn2")
 
 command -v uv >/dev/null || { echo "uv is required (https://docs.astral.sh/uv/)"; exit 1; }
 mkdir -p "$DEV_DIR/tokens"

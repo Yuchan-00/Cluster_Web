@@ -15,8 +15,9 @@ jobs:
       fail-fast: false
       matrix:
         package: [agent, execd]
-        # 3.8: RDK X3 Ubuntu 20.04 images. 3.11/3.13: Raspberry Pi OS bookworm/trixie.
-        python: ["3.8", "3.11", "3.13"]
+        # 3.8: RDK X3 Ubuntu 20.04 images. 3.10/3.12: ODROID-N2 Ubuntu 22.04/24.04 images.
+        # 3.11/3.13: Raspberry Pi OS bookworm/trixie.
+        python: ["3.8", "3.10", "3.11", "3.12", "3.13"]
     defaults:
       run:
         working-directory: ${{ matrix.package }}
