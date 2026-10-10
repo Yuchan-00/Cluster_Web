@@ -60,7 +60,7 @@
 | R2 | 추가 요구 | **요청 작업 완료 시 텔레그램 보고** | [telegram.md](./design/telegram.md) 6장. MVP(Phase 5)에 포함 |
 | D7 | RDK X3 RAM | **4GB** (2026-10-07) | topology.md 1.2·6장 용량값 확정 |
 | R4 | 추가 요구 | **AI 사용량은 Claude Code 구독으로** (2026-10-07) | API 키 과금 전제를 바꿈 → [ai-agent.md](./design/ai-agent.md) 0장. 보안 경계(security.md 15장)는 불변 |
-| D8 | 노드 추가 가능성 | **ODROID-N2 계열 2~3대를 추가할 수도 있음** (2026-10-10, 모델·대수·시점 미확정) | 보드 종류 `odroidn2`(N2/N2+/N2L 공통, `variant` 레이블로 구분)를 agent·master에 추가. [topology.md](./design/topology.md) 1.1.1: 보드 사실, **N2+ 4GB + eMMC 권장(N2L 비권장)**, 배치 A(현행)/B(N2+ 2대 이상이면 master를 `odroidn2-01`로) 비교, 용량 기본값 4/0/3328, Phase 0 O-체크리스트. 결정 대기는 21.1 Q20~Q23 |
+| D8 | 노드 추가 가능성 | **ODROID-N2 4GB를 2~3대 추가 예정** (2026-10-10; 대수·eMMC·배치는 21.1 Q20~Q23) | 보드 종류 `odroidn2`(N2/N2+/N2L 공통, `variant` 레이블로 구분)를 agent·master에 추가. [topology.md](./design/topology.md) 1.1.1: 보드 사실, **N2+ 4GB + eMMC 권장(N2L 비권장)**, 배치 A(현행)/B(N2+ 2대 이상이면 master를 `odroidn2-01`로) 비교, 용량 기본값 4/0/3328, Phase 0 O-체크리스트. 결정 대기는 21.1 Q20~Q23 |
 | R3 | 추가 요구 | **가능하면 서버의 로컬 에이전트가 자연어 지시 수행** | [ai-agent.md](./design/ai-agent.md): 에이전트 프로세스는 rdkx3-01에서 로컬로, 모델 추론만 Claude API(`claude-opus-5-5`). 보드에서 LLM을 돌리는 것은 비현실적(RAM·BPU 특성)이라 기각. Claude Agent SDK(원시 셸 내장)는 RBAC·승인을 우회하므로 기각하고 우리 API를 감싼 전용 툴만 노출 |
 
 ---
@@ -793,10 +793,10 @@ flowchart LR
 | Q17 | AI | 비용 상한 | **전제 변경**: 모델 사용량을 API 키가 아니라 사용자의 Claude Code 구독으로 처리하기로 함. 달러 상한 대신 구독 한도 안의 사용량(턴·토큰) 상한으로 바꾼다. 가능 여부·방식은 21.2와 [ai-agent.md](./design/ai-agent.md) 0장 |
 | Q18 | AI | `/cancel`의 기본 동작이 그 태스크가 시작한 실행 중 명령·잡까지 취소하는 것으로 맞는지(웹에는 "AI만 중단" 옵션) | 전부 취소 |
 | Q19 | AI | Anthropic 계정·조직 설정에서 API 데이터 보존·학습 사용 정책을 확인하고 받아들일 수 있는지 | 확인 필요 |
-| Q20 | 하드웨어 (D8) | ODROID-N2 계열 **모델과 대수**: N2+ 권장(A73 2.2GHz, 유선 1G, RTC). N2L은 유선 LAN·RTC가 없어 비권장. 2대 vs 3대 | **미확정** (설계는 2~3대, 변종 무관하게 대응) |
-| Q21 | 하드웨어 (D8) | RAM 4GB 변종인지(2GB면 `job_mem_mb` 1344, master 후보 제외), **eMMC 모듈(32GB 이상, 5.0 세대 이상이면 수명 모니터 가능)** 장착 여부 | **미확정** (설계 기본값 4GB + eMMC) |
-| Q22 | 토폴로지 (D8) | N2+ 2대 이상이면 **master를 `odroidn2-01`로 옮기는 배치 B**(topology.md 1.1.1)를 택할지. RDK X3 두 대를 BPU 전용 worker로 돌리고 master는 더 빠른 CPU·eMMC·RTC 위에 둔다 | **미확정** (권장: B. Phase 6 전까지 결정하면 재작업 없음) |
-| Q23 | 네트워크 (D8) | 노드 8대 + 업링크로 8포트 스위치가 모자람 → 16포트 교체 또는 두 번째 8포트 스위치 | **미확정** |
+| Q20 | 하드웨어 (D8) | ODROID-N2 계열 **모델과 대수**: N2+ 권장(A73 2.2GHz, 유선 1G, RTC). N2L은 유선 LAN·RTC가 없어 비권장. 2대 vs 3대 | **모델: ODROID-N2 4GB (2026-10-10)** — 원조 N2인지 N2+인지는 보드의 `/proc/device-tree/model`(O1)로 확정, 설계는 둘을 같은 `odroidn2`로 다루고 클럭만 다름(1.1.1 표). **대수: 미정(2~3대)** |
+| Q21 | 하드웨어 (D8) | RAM 4GB 변종인지(2GB면 `job_mem_mb` 1344, master 후보 제외), **eMMC 모듈(32GB 이상, 5.0 세대 이상이면 수명 모니터 가능)** 장착 여부 | **RAM 4GB 확정 (2026-10-10)**. eMMC는 **고민 중** — 권장: 배치 B를 택하면 master·스탠바이 두 대만 eMMC(DB·백업), 나머지 worker는 microSD로 충분. 없으면 master DB는 RDK X3 계획처럼 USB SSD 또는 SD + 쓰기 절감 규칙 |
+| Q22 | 토폴로지 (D8) | N2 2대 이상이면 **master를 `odroidn2-01`로 옮기는 배치 B**(topology.md 1.1.1)를 택할지. RDK X3 두 대를 BPU 전용 worker로 돌리고 master는 더 빠른 CPU·eMMC·RTC 위에 둔다 | **미확정** (설명 후 결정 대기, 2026-10-10. 권장: N2 2대 이상이면 B, 1대면 A 유지. Phase 6 전까지 결정하면 재작업 없음) |
+| Q23 | 네트워크 (D8) | 노드 8대 + 업링크로 8포트 스위치가 모자람 → 16포트 교체 또는 두 번째 8포트 스위치 | **필요하면 교체 의향 있음 (2026-10-10)** → N2 도착 시점에 16포트 기가비트로 교체. 나중의 VLAN 분리(security.md v2)까지 고려하면 managed(smart) 16포트 한 번에 |
 
 ### 21.2 이 통합에서 결정한 것 (재확인 불필요)
 

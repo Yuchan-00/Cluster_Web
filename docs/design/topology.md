@@ -26,13 +26,13 @@
 | `rpi3-01` | Raspberry Pi 3B | 1GB | 100Mbps (USB2 버스 공유) | worker(CPU) | cluster-agent, cluster-execd |
 | `rpi3-02` | Raspberry Pi 3B | 1GB | 100Mbps (USB2 버스 공유) | worker(CPU) | cluster-agent, cluster-execd |
 | `rpi3-03` | Raspberry Pi 3B | 1GB | 100Mbps (USB2 버스 공유) | worker(CPU) | cluster-agent, cluster-execd |
-| `odroidn2-01~03` (선택, 2~3대) | ODROID-N2+ (권장) / N2 | 4GB (2GB 변종 존재) | 1Gbps (N2L은 유선 없음, USB 2.0 NIC → Pi급) | worker(CPU 주력). 배치 B에서는 `odroidn2-01`이 master, `odroidn2-02`가 콜드 스탠바이 | cluster-agent, cluster-execd (배치 B: 01에 master 계열 추가, 02에 설치 후 mask) |
+| `odroidn2-01~03` (선택, 2~3대) | ODROID-N2 계열 (N2 또는 N2+, O1로 확정) | **4GB (확정, 2026-10-10)** | 1Gbps (N2L은 유선 없음, USB 2.0 NIC → Pi급) | worker(CPU 주력). 배치 B에서는 `odroidn2-01`이 master, `odroidn2-02`가 콜드 스탠바이 | cluster-agent, cluster-execd (배치 B: 01에 master 계열 추가, 02에 설치 후 mask) |
 
 Pi 3B는 PoE와 Wake-on-LAN을 지원하지 않는다. 즉 **원격으로 끈 노드는 물리적으로 전원을 다시 꽂아야 켜진다** (PLAN.md 8장의 poweroff 경고 유지). 원격 전원 사이클은 "나중" 단계의 스마트 플러그 확장으로 미룬다.
 
-#### 1.1.1 ODROID-N2 계열을 추가할 때 (2~3대, 미확정)
+#### 1.1.1 ODROID-N2 계열을 추가할 때 (4GB 모델 2~3대, 대수 미정)
 
-사용자가 ODROID-N2 계열을 2~3대 추가할 가능성을 열어 두었다(PLAN.md 2장 D8, 21.1 Q20~Q23). 보드 사실(2026-10-10 확인, 출처는 PLAN.md 21.3):
+사용자가 ODROID-N2 4GB 모델을 2~3대 추가할 예정이다(PLAN.md 2장 D8, 21.1 Q20~Q23; 대수·eMMC·배치는 미정). 보드 사실(2026-10-10 확인, 출처는 PLAN.md 21.3):
 
 | 항목 | ODROID-N2 (2019) | ODROID-N2+ (2020~) | ODROID-N2L (2022~) |
 |---|---|---|---|
