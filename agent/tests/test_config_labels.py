@@ -99,8 +99,9 @@ def test_link_down_speed_ignored(make_sysfs):
         ("rdkx3", "master", 1900, {"slots": 1, "bpu_slots": 1, "job_mem_mb": 384}),
         ("rdkx3", "master", 3800, {"slots": 1, "bpu_slots": 1, "job_mem_mb": 1408}),
         ("odroidn2", "worker", 3800, {"slots": 4, "bpu_slots": 0, "job_mem_mb": 3328}),
-        ("odroidn2", "worker", 1900, {"slots": 2, "bpu_slots": 0, "job_mem_mb": 1280}),
-        ("odroidn2", "master", 3800, {"slots": 1, "bpu_slots": 0, "job_mem_mb": 2432}),
+        ("odroidn2", "worker", 1900, {"slots": 2, "bpu_slots": 0, "job_mem_mb": 1344}),
+        ("odroidn2", "master", 3800, {"slots": 1, "bpu_slots": 0, "job_mem_mb": 2496}),
+        ("odroidn2", "master", 1900, {"slots": 1, "bpu_slots": 0, "job_mem_mb": 384}),
     ],
 )
 def test_default_capacity_matches_topology_table(board, role, mem_mb, expected):

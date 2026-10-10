@@ -230,9 +230,9 @@ def _n2_mainline(extra=None):
         "/sys/class/thermal/cooling_device2/type": "cpufreq-cpu2\n",
         "/sys/class/thermal/cooling_device2/cur_state": "0\n",
         "/sys/devices/system/cpu/cpufreq/policy0/related_cpus": "0 1\n",
-        "/sys/devices/system/cpu/cpufreq/policy0/scaling_cur_freq": "1896000\n",
-        "/sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq": "1896000\n",
-        "/sys/devices/system/cpu/cpufreq/policy0/cpuinfo_max_freq": "1896000\n",
+        "/sys/devices/system/cpu/cpufreq/policy0/scaling_cur_freq": "1800000\n",
+        "/sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq": "1800000\n",
+        "/sys/devices/system/cpu/cpufreq/policy0/cpuinfo_max_freq": "1800000\n",
         "/sys/devices/system/cpu/cpufreq/policy2/related_cpus": "2 3 4 5\n",
         "/sys/devices/system/cpu/cpufreq/policy2/scaling_cur_freq": "2208000\n",
         "/sys/devices/system/cpu/cpufreq/policy2/scaling_max_freq": "2208000\n",
@@ -269,22 +269,85 @@ def test_odroid_mainline_layout(make_sysfs):
     sample = c.collect()
     assert sample["temp_c"] == 52.3  # the CPU zone, although it is thermal_zone1 here
     assert sample["extra"]["ddr_temp_c"] == 41.0
-    assert sample["extra"]["cpu_freq_mhz"] == {"little": 1896, "big": 2208}
-    assert sample["extra"]["thermal_throttle"] is False  # the fan is on, cpufreq is not capped
+    assert sample["extra"]["cpu_freq_mhz"] == {"little": 1800, "big": 2208}
+    assert sample["extra"]["thermal_throttle"] is False  # the fan is on, cpufreq cooling is not
+    assert sample["extra"]["freq_capped"] is False
     assert c.collect_slow() == {"extra": {"emmc_life": {"a": 1, "b": 2, "pre_eol": 1}}}
 
 
-def test_odroid_detects_throttling(make_sysfs):
-    capped = OdroidN2Collector(
+def test_odroid_throttle_and_cap_are_separate(make_sysfs):
+    cooling = OdroidN2Collector(
         make_sysfs(_n2_mainline({"/sys/class/thermal/cooling_device2/cur_state": "3\n"}))
     )
-    assert capped.collect()["extra"]["thermal_throttle"] is True
+    extra = cooling.collect()["extra"]
+    assert extra["thermal_throttle"] is True and extra["freq_capped"] is False
+    # an administrative or boot.ini ceiling is a cap, not thermal throttling (jobs.md 5.2)
     ceiling = OdroidN2Collector(
         make_sysfs(
             _n2_mainline({"/sys/devices/system/cpu/cpufreq/policy2/scaling_max_freq": "1800000\n"})
         )
     )
-    assert ceiling.collect()["extra"]["thermal_throttle"] is True
+    extra = ceiling.collect()["extra"]
+    assert extra["thermal_throttle"] is False and extra["freq_capped"] is True
+
+
+def test_odroid_emmc_wear_parsing(make_sysfs):
+    # eMMC < 5.0 module: the files exist but hold "not defined" -> no wear data
+    files = _n2_mainline(
+        {
+            "/sys/bus/mmc/devices/mmc1:0001/life_time": "0x00 0x00\n",
+            "/sys/bus/mmc/devices/mmc1:0001/pre_eol_info": "0x00\n",
+        }
+    )
+    assert OdroidN2Collector(make_sysfs(files)).collect_slow() == {"extra": {"emmc_life": None}}
+    # Hardkernel 4.9 prints the bytes without the 0x prefix
+    files = _n2_mainline(
+        {
+            "/sys/bus/mmc/devices/mmc1:0001/life_time": "0a 0b\n",
+            "/sys/bus/mmc/devices/mmc1:0001/pre_eol_info": "02\n",
+        }
+    )
+    assert OdroidN2Collector(make_sysfs(files)).collect_slow()["extra"]["emmc_life"] == {
+        "a": 10,
+        "b": 11,
+        "pre_eol": 2,
+    }
+    # garbage is dropped per field, not per record
+    files = _n2_mainline(
+        {
+            "/sys/bus/mmc/devices/mmc1:0001/life_time": "0xff zz\n",
+            "/sys/bus/mmc/devices/mmc1:0001/pre_eol_info": "0x03\n",
+        }
+    )
+    assert OdroidN2Collector(make_sysfs(files)).collect_slow()["extra"]["emmc_life"] == {
+        "a": None,
+        "b": None,
+        "pre_eol": 3,
+    }
+
+
+def test_odroid_bogus_frequencies_become_null(make_sysfs):
+    files = _n2_mainline(
+        {
+            "/sys/devices/system/cpu/cpufreq/policy0/scaling_cur_freq": "-5\n",
+            "/sys/devices/system/cpu/cpufreq/policy2/scaling_cur_freq": "99999999999\n",
+        }
+    )
+    assert OdroidN2Collector(make_sysfs(files)).collect()["extra"]["cpu_freq_mhz"] == {
+        "little": None,
+        "big": None,
+    }
+
+
+def test_odroid_discovery_retries_until_complete(tmp_path, make_sysfs):
+    """Started before the drivers probed: nothing is cached, later samples see the sensors."""
+    sysfs = make_sysfs({"/proc/device-tree/model": "Hardkernel ODROID-N2Plus"})
+    c = OdroidN2Collector(sysfs)
+    assert c.collect()["extra"]["cpu_freq_mhz"] == {} and "temp_c" not in c.collect()
+    make_sysfs(_n2_mainline())  # the same tmp_path tree gains the sysfs entries
+    sample = c.collect()
+    assert sample["temp_c"] == 52.3 and sample["extra"]["cpu_freq_mhz"]["big"] == 2208
+    assert c.static_info()["big_cores"] == 4
 
 
 def test_odroid_hardkernel_49_layout(make_sysfs):
@@ -309,6 +372,7 @@ def test_odroid_hardkernel_49_layout(make_sysfs):
     assert sample["temp_c"] == 61.0 and sample["extra"]["ddr_temp_c"] == 48.0
     assert sample["extra"]["cpu_freq_mhz"] == {"little": 1000, "big": 1800}
     assert sample["extra"]["thermal_throttle"] is True
+    assert sample["extra"]["freq_capped"] is None  # no cpuinfo_max_freq in this fixture
     assert c.collect_slow() == {"extra": {"emmc_life": None}}
 
 
@@ -318,7 +382,12 @@ def test_odroid_without_sysfs_reports_nulls(make_sysfs):
     assert info["variant"] == "n2l" and info["emmc"] is False and info["big_cores"] == 0
     sample = c.collect()
     assert "temp_c" not in sample
-    assert sample["extra"] == {"ddr_temp_c": None, "cpu_freq_mhz": {}, "thermal_throttle": None}
+    assert sample["extra"] == {
+        "ddr_temp_c": None,
+        "cpu_freq_mhz": {},
+        "thermal_throttle": None,
+        "freq_capped": None,
+    }
 
 
 def test_metrics_collector_wires_odroid(make_sysfs):
@@ -332,6 +401,7 @@ def test_metrics_collector_wires_odroid(make_sysfs):
 def test_mock_odroid_profile():
     mc = MetricsCollector(board="odroidn2", mock_name="odroidn2-01")
     info = mc.static_info()
-    assert info["cpu_count"] == 6 and info["variant"] == "n2plus" and info["bpu_cores"] is None
+    assert info["cpu_count"] == 6 and info["variant"] == "n2plus" and "bpu_cores" not in info
     sample = mc.collect()
-    assert set(sample["extra"]) >= {"ddr_temp_c", "cpu_freq_mhz", "thermal_throttle"}
+    assert set(sample["extra"]) >= {"ddr_temp_c", "cpu_freq_mhz", "thermal_throttle", "freq_capped"}
+    assert sample["extra"]["emmc_life"] == {"a": 1, "b": 2, "pre_eol": 1}  # first sample is slow

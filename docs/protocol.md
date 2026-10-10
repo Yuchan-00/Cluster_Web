@@ -50,7 +50,8 @@ Phase 2 기준 구현 명세. 설계 배경은 `docs/PLAN.md` 12.1, 보안 요�
 - `metrics.data.extra`는 허용 키만 남긴다(agent·master 양쪽 `EXTRA_KEYS`): `bpu`(rdkx3, 코어별 %),
   `throttled`(rpi3, `get_throttled` hex 문자열), `core_volts`(rpi3), `reboot_required`, `isolation_mode`,
   `ddr_temp_c`(odroidn2, DDR 센서 °C), `cpu_freq_mhz`(odroidn2, `{"little": MHz, "big": MHz}`),
-  `thermal_throttle`(odroidn2, bool), `emmc_life`(odroidn2, `{"a","b","pre_eol"}` 또는 null).
+  `thermal_throttle`(odroidn2, bool: cpufreq 쿨링 작동 중), `freq_capped`(odroidn2, bool: 클러스터 상한이
+  하드웨어 최대 미만), `emmc_life`(odroidn2, `{"a","b","pre_eol"}` 또는 null).
   필터 후에도 4 KB 또는 64키를 넘으면 `extra`를 비우고 위반 1회.
 - `cmd_output.data`는 직렬화 기준 64 KiB 이하.
 - `NaN`/`Infinity`는 JSON이 아니므로 어디에 있어도 위반. 중첩 깊이 32 초과도 위반.

@@ -26,10 +26,11 @@ def _default_capacity(board: str, role: str, mem_mb: Optional[int]) -> Dict[str,
         return {"slots": 2, "bpu_slots": 0, "job_mem_mb": 384}
     if board == "odroidn2":
         # 6 cores (2 little + 4 big), 2GB or 4GB. Slots = big cores; the little cores keep the
-        # OS and the agent responsive. Numbers from topology.md 6.5.
+        # OS and the agent responsive. Numbers from topology.md 6.5/6.6 (nominal RAM, like the
+        # RDK X3 rows; recomputed from the measured MemTotal in Phase 0).
         if role == "master":
-            return {"slots": 1, "bpu_slots": 0, "job_mem_mb": 2432 if big else 384}
-        return {"slots": 4 if big else 2, "bpu_slots": 0, "job_mem_mb": 3328 if big else 1280}
+            return {"slots": 1, "bpu_slots": 0, "job_mem_mb": 2496 if big else 384}
+        return {"slots": 4 if big else 2, "bpu_slots": 0, "job_mem_mb": 3328 if big else 1344}
     generic_mem = 256 if mem_mb is None else max(256, (mem_mb - 1024) // 64 * 64)
     return {"slots": 1, "bpu_slots": 0, "job_mem_mb": generic_mem}
 

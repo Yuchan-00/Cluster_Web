@@ -115,9 +115,9 @@ flowchart LR
 
 | 노드 | Tailscale | 태그 | 이유 |
 |---|---|---|---|
-| rdkx3-01 | 설치 | `tag:cluster-master` | 유일한 외부 진입점 ([topology.md](./topology.md) 3.1) |
-| rdkx3-02 | 설치 | `tag:cluster-standby` | failover 시 외부 경로를 바로 넘기기 위해. 평소에는 SSH만 쓰임(웹 서비스는 mask 상태) |
-| rpi3-01~03 | **설치 안 함** | — | 1GB RAM 절약, worker 침해가 tailnet 진입으로 번지지 않음. 외부에서의 SSH는 rdkx3-01을 경유(ProxyJump) |
+| master 호스트 (배치 A: rdkx3-01 · 배치 B: odroidn2-01, topology.md 1.1.1) | 설치 | `tag:cluster-master` | 유일한 외부 진입점 ([topology.md](./topology.md) 3.1) |
+| 콜드 스탠바이 (A: rdkx3-02 · B: odroidn2-02) | 설치 | `tag:cluster-standby` | failover 시 외부 경로를 바로 넘기기 위해. 평소에는 SSH만 쓰임(웹 서비스는 mask 상태) |
+| 그 밖의 worker (rpi3-01~03, 배치 B에서는 rdkx3-01·02와 odroidn2-03도) | **설치 안 함** | — | RAM 절약, worker 침해가 tailnet 진입으로 번지지 않음. 외부에서의 SSH는 master 호스트를 경유(ProxyJump). 배치 전환으로 worker가 된 호스트는 `tailscale logout` 후 관리 콘솔에서 기기 삭제 |
 
 - subnet router(`--advertise-routes`)와 exit node는 쓰지 않는다. LAN 전체를 tailnet에 노출하게 되기 때문이다.
 - Tailscale SSH 대신 OpenSSH를 쓴다(4.4). 설정: `tailscale up --advertise-tags=tag:cluster-master --ssh=false --accept-routes=false --accept-dns=false` (rdkx3-02는 태그만 다름). 인증 키는 **일회용·태그 지정·짧은 만료**로 발급해 쓰고 버린다.
@@ -232,7 +232,7 @@ IP는 [topology.md](./topology.md) 3.2 예시 기준이며 Phase 0에서 실제 
 | rdkx3-01 | tailscaled (root) | tailnet IP | tcp/443 (serve), tcp/22 경유 | tailnet ACL: `group:cluster-admins` |
 | rdkx3-01 | cluster-master (`cluster-master`) | 127.0.0.1 | tcp/8000, tcp/8001 | tailscale serve / Caddy만 (4.3 output 규칙) |
 | rdkx3-01 | cluster-master | UDS | `/run/cluster-master/internal.sock` | 그룹 `cluster-svc` (= `cluster-telegram`, `cluster-ai`) |
-| rdkx3-01 | Caddy (`caddy`) | VIP 192.168.1.200 | tcp/443 | 등록 노드 IP 5개 |
+| rdkx3-01 | Caddy (`caddy`) | VIP 192.168.1.200 | tcp/443 | 등록 노드 IP 전부(기본 5대, ODROID-N2 추가 시 7~8대; 노드 추가 때마다 재생성) |
 | rdkx3-01 | chrony (서버) | 0.0.0.0 | udp/123 | 등록 노드 IP |
 | rdkx3-01 | cluster-telegram (`cluster-telegram`) | — | 리스닝 없음 (→ api.telegram.org:443) | — |
 | rdkx3-01 | cluster-ai (`cluster-ai`) | — | 리스닝 없음 (→ AI 백엔드:443) | — |
@@ -254,6 +254,8 @@ ufw 대신 **nftables 하나**로 통일한다(두 OS 공통, 규칙을 파일 �
 flush ruleset
 
 define VIP      = 192.168.1.200
+# 등록 노드 전부. deploy/hosts.cluster에서 생성하며 노드를 추가·제거할 때마다 다시 만든다
+# (ODROID-N2 추가 시 192.168.1.221~223이 더해진다, topology.md 1.3). 빠진 노드의 agent는 wss가 막힌다.
 define NODES    = { 192.168.1.201, 192.168.1.202, 192.168.1.211, 192.168.1.212, 192.168.1.213 }
 define ADMIN_PC = { 192.168.1.50 }          # 관리 PC (DHCP 예약, Phase 0)
 
@@ -292,8 +294,8 @@ table inet filter {
 flush ruleset
 
 define VIP      = 192.168.1.200
-define MASTERS  = { 192.168.1.201, 192.168.1.202 }   # rdkx3-01, rdkx3-02 (ProxyJump, 백업 push, failover 후)
-define NODES    = { 192.168.1.201, 192.168.1.202, 192.168.1.211, 192.168.1.212, 192.168.1.213 }
+define MASTERS  = { 192.168.1.201, 192.168.1.202 }   # master·스탠바이 호스트 (배치 B: 192.168.1.221, .222) — ProxyJump, 백업 push, failover 후
+define NODES    = { 192.168.1.201, 192.168.1.202, 192.168.1.211, 192.168.1.212, 192.168.1.213 }   # 등록 노드 전부, hosts.cluster에서 재생성
 define ADMIN_PC = { 192.168.1.50 }
 
 table inet filter {
@@ -604,7 +606,7 @@ approvals (
 | 중복 연결 | 같은 노드의 연결이 이미 살아 있으면(마지막 메시지가 `2 × metrics_interval` 이내) **새** 연결을 close 4409로 끊고 `alert.raised`(토큰 탈취 징후). 기존 연결이 그보다 오래 조용하면 죽은 것으로 보고 기존 연결을 4409로 닫고 새 연결을 받는다(알림 없음). 상세는 `docs/protocol.md` 1장 |
 | 스키마 | pydantic 엄격 모델(타입·길이·범위). 알 수 없는 `type`은 버리고 카운트 |
 | 크기 | WebSocket 메시지 최대 1 MiB (`max_size`), 출력 청크 64 KiB |
-| 필드 상한 | `metrics.extra` 직렬화 후 ≤ 4 KB · 키 ≤ 64개 · **허용 목록 키만**(`bpu`, `throttled`, `core_volts`, `reboot_required`, `isolation_mode`, ODROID-N2용 `ddr_temp_c`, `cpu_freq_mhz`, `thermal_throttle`, `emmc_life`; 목록은 agent·master 양쪽 코드 상수 `EXTRA_KEYS`로 같아야 한다) · `sched.running`, `sched.cached_bundles` 배열 길이 ≤ 64, 요소 문자열 ≤ 32자 · `static_info` 직렬화 후 ≤ 16 KB. 초과분은 잘라내고 `rejected_fields` 카운트, 10분 지속 시 `alert.raised`(security.node_input). `metrics_1m.extra` 저장 시에도 같은 상한을 다시 적용 |
+| 필드 상한 | `metrics.extra` 직렬화 후 ≤ 4 KB · 키 ≤ 64개 · **허용 목록 키만**(`bpu`, `throttled`, `core_volts`, `reboot_required`, `isolation_mode`, ODROID-N2용 `ddr_temp_c`, `cpu_freq_mhz`, `thermal_throttle`, `freq_capped`, `emmc_life`; 목록은 agent·master 양쪽 코드 상수 `EXTRA_KEYS`로 같아야 하고 master 테스트가 동일성을 검사한다) · `sched.running`, `sched.cached_bundles` 배열 길이 ≤ 64, 요소 문자열 ≤ 32자 · `static_info` 직렬화 후 ≤ 16 KB. 초과분은 잘라내고 `rejected_fields` 카운트, 10분 지속 시 `alert.raised`(security.node_input). `metrics_1m.extra` 저장 시에도 같은 상한을 다시 적용 |
 | 속도 | 연결당 토큰 버킷: 초당 50 메시지·1 MiB/s(버스트 2배). `metrics`는 2초에 1개 이하. 초과 시 drop, 지속되면 close 4429 + 경보 |
 | 메트릭 값 | NaN/Inf/음수/비현실적 값은 null로 |
 | 정적 정보 | hostname 등 문자열은 `[A-Za-z0-9._-]{1,64}`만, 화면의 노드 이름은 **DB에 등록된 이름**을 쓰고 보고된 hostname은 보조 표시(불일치 시 경고) |

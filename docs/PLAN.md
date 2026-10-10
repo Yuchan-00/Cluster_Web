@@ -74,7 +74,7 @@
 | `rdkx3-01` | RDK X3 (4GB) | **master** + worker(축소) | cluster-master, cluster-telegram, cluster-ai, cluster-agent, cluster-execd, Caddy, tailscaled, chrony 서버 | 1 / 1 / 1408 |
 | `rdkx3-02` | RDK X3 | worker(BPU 주력) + master 콜드 스탠바이 | cluster-agent, cluster-execd, tailscaled (master 계열은 설치 후 mask) | 3 / 2 / 2816 |
 | `rpi3-01~03` | Raspberry Pi 3B (1GB) | worker(CPU) | cluster-agent, cluster-execd | 2 / 0 / 384 (잠정) |
-| `odroidn2-01~03` (선택, D8) | ODROID-N2+ (4GB, 6코어 big.LITTLE, 1Gbps, eMMC) | worker(CPU 주력). 배치 B: 01 = master, 02 = 콜드 스탠바이 | cluster-agent, cluster-execd (배치 B: 01에 master 계열) | 4 / 0 / 3328 (master면 1 / 0 / 2432) |
+| `odroidn2-01~03` (선택, D8) | ODROID-N2+ (4GB, 6코어 big.LITTLE, 1Gbps, eMMC) | worker(CPU 주력). 배치 B: 01 = master, 02 = 콜드 스탠바이 | cluster-agent, cluster-execd (배치 B: 01에 master 계열) | 4 / 0 / 3328 (master면 1 / 0 / 2496, 2GB 변종 2 / 0 / 1344) |
 
 - **ODROID-N2 추가 시**: topology.md 1.1.1의 배치 B(master를 N2+로 이전, RDK X3 둘 다 BPU worker)를 권장한다. agent는 VIP 이름으로 접속하므로 배치 전환은 master 설치 위치와 VIP 소유만 바뀐다. 스위치 포트는 8포트로 부족(Q23).
 - **네트워크**: 기가비트 unmanaged 스위치, 전 노드 유선, DHCP 예약. agent는 물리 호스트가 아니라 VIP 이름 `master.cluster.internal`로 접속한다. 대역은 Phase 0에서 실제 값으로 치환(예시 `192.168.1.0/24`).
@@ -262,9 +262,9 @@ sequenceDiagram
 ### 7.3b ODROID-N2 계열 전용 (D8, 추가 시)
 
 - **온도 2개**: `/sys/class/thermal/thermal_zone*/type`을 읽어 이름으로 고른다 — CPU(`cpu-thermal` 또는 Hardkernel 4.9의 `soc_thermal`) → `temp_c`, DDR(`ddr-thermal`/`ddr_thermal`) → `extra.ddr_temp_c`. zone 번호는 프로브 순서라 부팅마다 바뀔 수 있다.
-- **클러스터별 클럭**: cpufreq `policy*/related_cpus`로 little(2× A53)/big(4× A73)을 식별하고 `scaling_cur_freq` → `extra.cpu_freq_mhz: {"little": 1896, "big": 2208}`. `cpuinfo_cur_freq`는 root 전용이라 쓰지 않는다.
-- **스로틀링**: 펌웨어 플래그가 없다. cpufreq 쿨링 디바이스(`cooling_device*/type`에 `cpufreq`)의 `cur_state > 0` 또는 `scaling_max_freq < cpuinfo_max_freq` → `extra.thermal_throttle: true`. 스케줄러 필터는 Pi의 throttled 비트와 같은 취급.
-- **eMMC 수명**: `/sys/bus/mmc/devices/<type=MMC>/life_time`(`0x01 0x02`: SLC/MLC 영역 10% 단위 사용량), `pre_eol_info`(1 정상 / 2 경고 / 3 긴급) → `extra.emmc_life: {"a","b","pre_eol"}` (15초 주기). eMMC 4.5 세대 모듈은 값이 없다(`null`). 경고 규칙(7.4): `pre_eol ≥ 2` 또는 `a/b ≥ 0x0A`면 warning.
+- **클러스터별 클럭**: cpufreq `policy*/related_cpus`로 little(2× A53)/big(4× A73)을 식별하고 `scaling_cur_freq` → `extra.cpu_freq_mhz: {"little": 1800, "big": 2208}`(N2+, 메인라인 커널의 스톡 상한). `cpuinfo_cur_freq`는 root 전용이라 쓰지 않는다.
+- **스로틀링**: 펌웨어 플래그가 없다. cpufreq 쿨링 디바이스(`cooling_device*/type`에 `cpufreq`)의 `cur_state > 0` → `extra.thermal_throttle: true`(지금 열 제한 중; 스케줄러 필터는 Pi의 throttled 비트와 같은 취급). `scaling_max_freq < cpuinfo_max_freq`는 별도 키 `extra.freq_capped: true`(열 제한 잔류 또는 관리자·boot.ini 상한)로 보고하고 배치에는 쓰지 않는다 — 관리자가 일부러 낮춘 클럭이 노드를 영구히 배치 제외시키면 안 되기 때문이다.
+- **eMMC 수명**: `/sys/bus/mmc/devices/<type=MMC>/life_time`(`0x01 0x02`: A/B 영역 10% 단위 사용량, 0x0B = 초과), `pre_eol_info`(1 정상 / 2 경고 / 3 긴급; 4.9 커널은 `0x` 없이 `01`로 찍음) → `extra.emmc_life: {"a","b","pre_eol"}` (15초 주기). 파일은 모든 MMC 카드에 있지만 eMMC 5.0 미만 모듈은 0x00("정의 안 됨")만 들어 있다 → 전부 0이면 `null`. 경고 규칙은 7.4 표.
 - 저전압 텔레메트리(PMIC)는 없어 전원 문제는 보고하지 못한다. 팬 상태(`gpio-fan`/`pwm-fan` cur_state)는 v2.
 
 collector 구조: `collectors/base.py`(인터페이스 `static_info()`, `collect()`), `common.py`, `rpi.py`, `rdkx3.py`, `odroid.py`. 보드는 config의 `board`를 우선하고 없으면 `/proc/device-tree/model`로 감지한다. 각 항목은 개별 try/except로 감싸 실패 값은 `null`로 보낸다. master는 `extra`를 허용 키 목록·4KB 상한으로 다시 자른다(security.md 8.3).
@@ -276,6 +276,9 @@ collector 구조: `collectors/base.py`(인터페이스 `static_info()`, `collect
 | 노드 15초 이상 응답 없음 | 별도 `node.offline` 이벤트(경고 수준과 별개. 텔레그램은 60초 지속 시, 방해 금지 시간에는 보류 → 요약) | telegram.md 8.1 |
 | 온도 ≥ 70°C / ≥ 80°C | warning / critical | 70°C 이상 노드에는 신규 잡 배치 안 함(jobs.md 5.2) |
 | Pi 저전압 플래그 | warning | 현재 비트면 신규 잡 배치 안 함 |
+| ODROID-N2 `extra.thermal_throttle = true` | warning | Pi throttled 비트와 동일: true인 동안 신규 잡 배치 안 함(jobs.md 5.2). `freq_capped`는 표시만(배치 무관) |
+| ODROID-N2 DDR 온도 `extra.ddr_temp_c` ≥ 80°C | warning | CPU 온도 행과 별개. 배치 제외는 CPU 온도 행으로만 판단 |
+| ODROID-N2 eMMC 수명 `extra.emmc_life.pre_eol ≥ 2` 또는 `a`/`b` ≥ 0x0A | warning (`pre_eol = 3`이면 critical) | eMMC 5.0+ 모듈만(`null`이면 규칙 미적용). topology.md 4.3 |
 | 디스크 ≥ 90% | warning | |
 | 메모리 ≥ 90% 5분 지속 | warning | |
 | `reboot-required` | warning | security.md 17장 |
@@ -753,7 +756,8 @@ flowchart LR
 | Tailscale·IdP 계정 탈취 | IdP MFA, device approval, ACL, 앱 비밀번호 + TOTP가 별도로 필요 |
 | 공급망 | 해시 고정, CI에서만 빌드, 서명 저장소, curl\|bash 금지 |
 | BPU 동시 사용 동작 불명 | Phase 0 확인 후 `bpu_slots` 조정 |
-| ODROID-N2 추가 시 Hardkernel 22.04 이미지(커널 4.9)를 쓰면 cgroup v2 `cpu` 컨트롤러·최신 샌드박스 속성 부재, glibc 커널 버전 거부 전례 | 24.04(6.6) 또는 Armbian(6.18)으로 굽는다(topology.md 5장). Phase 0 O2에서 4.9이면 설치 중단 |
+| ODROID-N2 추가 시 Hardkernel 22.04 이미지(커널 4.9)를 쓰면 cgroup v2 `cpu` 컨트롤러 부재(`CPUQuota`/`CPUWeight` 무효), Hardkernel이 24.04 업그레이드 경로를 지원하지 않음 | 24.04(6.6) 또는 Armbian(6.18)으로 굽는다(topology.md 5장). Phase 0 O2에서 4.9이면 설치 중단 |
+| 노드 추가 후 방화벽·`PermitOpen`·Caddy 허용 IP가 옛 5대 목록 | 등록 노드 목록에서 재생성하는 절차를 1.3절·9장 10단계에 명시(security.md 4.3) |
 | ODROID-N2L은 유선 LAN·RTC 없음 | 클러스터 노드로 비권장(topology.md 1.1.1). 쓰더라도 USB 기가비트 NIC + `variant=n2l` 레이블, master 후보 제외 |
 | eMMC 마모(master DB·백업이 eMMC에 있을 때) | `extra.emmc_life` 모니터 + 경고(7.3b), 1분 집계·journald 제한은 SD와 동일 적용, 백업은 다른 노드에 |
 | 노드 8대 + 업링크 > 8포트 스위치 | 16포트 교체 또는 두 번째 스위치(Q23) |
@@ -790,7 +794,7 @@ flowchart LR
 | Q18 | AI | `/cancel`의 기본 동작이 그 태스크가 시작한 실행 중 명령·잡까지 취소하는 것으로 맞는지(웹에는 "AI만 중단" 옵션) | 전부 취소 |
 | Q19 | AI | Anthropic 계정·조직 설정에서 API 데이터 보존·학습 사용 정책을 확인하고 받아들일 수 있는지 | 확인 필요 |
 | Q20 | 하드웨어 (D8) | ODROID-N2 계열 **모델과 대수**: N2+ 권장(A73 2.2GHz, 유선 1G, RTC). N2L은 유선 LAN·RTC가 없어 비권장. 2대 vs 3대 | **미확정** (설계는 2~3대, 변종 무관하게 대응) |
-| Q21 | 하드웨어 (D8) | RAM 4GB 변종인지(2GB면 `job_mem_mb` 1280, master 후보 제외), **eMMC 모듈(32GB 이상) 장착** 여부 | **미확정** (설계 기본값 4GB + eMMC) |
+| Q21 | 하드웨어 (D8) | RAM 4GB 변종인지(2GB면 `job_mem_mb` 1344, master 후보 제외), **eMMC 모듈(32GB 이상, 5.0 세대 이상이면 수명 모니터 가능)** 장착 여부 | **미확정** (설계 기본값 4GB + eMMC) |
 | Q22 | 토폴로지 (D8) | N2+ 2대 이상이면 **master를 `odroidn2-01`로 옮기는 배치 B**(topology.md 1.1.1)를 택할지. RDK X3 두 대를 BPU 전용 worker로 돌리고 master는 더 빠른 CPU·eMMC·RTC 위에 둔다 | **미확정** (권장: B. Phase 6 전까지 결정하면 재작업 없음) |
 | Q23 | 네트워크 (D8) | 노드 8대 + 업링크로 8포트 스위치가 모자람 → 16포트 교체 또는 두 번째 8포트 스위치 | **미확정** |
 

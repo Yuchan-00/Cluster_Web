@@ -2,16 +2,19 @@
 
 Everything comes from sysfs; there is no vendor tool to spawn. The board has two on-die
 temperature sensors (CPU and DDR) and two cpufreq clusters (2x Cortex-A53 little, 4x Cortex-A73
-big). Kernel differences that matter (docs/design/topology.md 1.1, 8.1 O-series):
+big). Kernel differences that matter (docs/design/topology.md 1.1.1, 8.1 O-series):
 
 - thermal zone `type` is "cpu-thermal"/"ddr-thermal" on mainline-based kernels (Hardkernel 6.x,
   Armbian) and "soc_thermal"/"ddr_thermal" on the Hardkernel 4.9 images. Zones are matched by
   type, never by index: thermal_zone0 is whichever sensor probed first.
 - cpufreq policies are named after their first CPU (policy0 = little, policy2 = big on both
   kernel families); `related_cpus` is read rather than assumed.
-- throttling has no firmware flag like the Pi's `get_throttled`; it is inferred from the cpufreq
-  cooling devices (`cur_state > 0`) or from `scaling_max_freq < cpuinfo_max_freq`.
-- eMMC modules of generation 5.0+ expose wear estimates in /sys/bus/mmc/devices/*/life_time.
+- there is no firmware flag like the Pi's `get_throttled`. `thermal_throttle` is the state of
+  the cpufreq cooling devices (what the thermal framework is doing right now); `freq_capped`
+  says a cluster's ceiling is below the hardware maximum for any reason (thermal cap that is
+  still in force, an administrative `scaling_max_freq`, boot.ini `max_freq_*`).
+- eMMC wear estimates live in /sys/bus/mmc/devices/*/life_time and pre_eol_info. The files exist
+  for every MMC card but hold 0x00 unless the module is eMMC 5.0 or newer.
 """
 
 from __future__ import annotations
@@ -30,8 +33,9 @@ CPU_ZONE_TYPES = ("cpu-thermal", "soc_thermal", "cpu_thermal", "soc-thermal")
 DDR_ZONE_TYPES = ("ddr-thermal", "ddr_thermal")
 # mainline: "cpufreq-cpu0" (older: "thermal-cpufreq-0"); Hardkernel 4.9: "cpufreq_cool0" etc.
 _CPUFREQ_COOLING = re.compile(r"(cpufreq|thermal-cpufreq)", re.I)
-
-_MB = 1024 * 1024
+_MAX_KHZ = 10_000_000  # 10 GHz: anything above is a broken reading
+_LIFE_MAX = 0x0B  # eMMC life time estimate 0x01..0x0A (10% steps), 0x0B = exceeded
+_PRE_EOL_MAX = 3  # 1 normal, 2 warning (80% reserved blocks used), 3 urgent
 
 
 def detect_variant(model: Optional[str]) -> Optional[str]:
@@ -69,63 +73,67 @@ class OdroidN2Collector(Collector):
 
     def __init__(self, sysfs: Optional[SysFS] = None) -> None:
         self.sysfs = sysfs or SysFS()
+        # Discovery results are cached only once they are complete: an agent that starts before
+        # the thermal or cpufreq drivers have probed keeps looking instead of freezing "nothing".
         self._zones: Optional[Dict[str, str]] = None  # {"cpu": "/sys/.../thermal_zoneN", ...}
         self._clusters: Optional[Dict[str, str]] = None  # {"little": policy dir, "big": ...}
 
-    # -- discovery (cached: sysfs layout does not change while the agent runs) ---------------
+    # -- discovery ---------------------------------------------------------------------------
 
     def _thermal_zones(self) -> Dict[str, str]:
-        if self._zones is None:
-            zones: Dict[str, str] = {}
-            for path in self.sysfs.glob(_THERMAL_GLOB):
-                ztype = (self.sysfs.read(path) or "").strip()
-                zone_dir = path.rsplit("/", 1)[0]
-                if ztype in CPU_ZONE_TYPES and "cpu" not in zones:
-                    zones["cpu"] = zone_dir
-                elif ztype in DDR_ZONE_TYPES and "ddr" not in zones:
-                    zones["ddr"] = zone_dir
+        if self._zones is not None:
+            return self._zones
+        zones: Dict[str, str] = {}
+        for path in self.sysfs.glob(_THERMAL_GLOB):
+            ztype = (self.sysfs.read(path) or "").strip()
+            zone_dir = path.rsplit("/", 1)[0]
+            if ztype in CPU_ZONE_TYPES and "cpu" not in zones:
+                zones["cpu"] = zone_dir
+            elif ztype in DDR_ZONE_TYPES and "ddr" not in zones:
+                zones["ddr"] = zone_dir
+        if "cpu" in zones and "ddr" in zones:
             self._zones = zones
-        return self._zones
+        return zones
 
     def _cpu_clusters(self) -> Dict[str, str]:
         """Policy directories keyed little/big by cluster size (2 little A53, 4 big A73).
 
         Falls back to 'first policy = little' when both clusters have the same size.
         """
-        if self._clusters is None:
-            policies = []
-            for path in self.sysfs.glob(_POLICY_GLOB):
-                cpus = _parse_cpu_list(self.sysfs.read(path))
-                if cpus:
-                    policies.append((cpus, path.rsplit("/", 1)[0]))
-            clusters: Dict[str, str] = {}
-            if len(policies) >= 2:
-                policies.sort(key=lambda item: (len(item[0]), item[0][0]))
-                clusters["little"] = policies[0][1]
-                clusters["big"] = policies[-1][1]
-            elif len(policies) == 1:
-                clusters["big"] = policies[0][1]
-            self._clusters = clusters
-        return self._clusters
+        if self._clusters is not None:
+            return self._clusters
+        policies = []
+        for path in self.sysfs.glob(_POLICY_GLOB):
+            cpus = _parse_cpu_list(self.sysfs.read(path))
+            if cpus:
+                policies.append((cpus, path.rsplit("/", 1)[0]))
+        clusters: Dict[str, str] = {}
+        if len(policies) >= 2:
+            policies.sort(key=lambda item: (len(item[0]), item[0][0]))
+            clusters["little"] = policies[0][1]
+            clusters["big"] = policies[-1][1]
+            self._clusters = clusters  # both clusters seen: complete
+        elif len(policies) == 1:
+            clusters["big"] = policies[0][1]
+        return clusters
 
     # -- Collector interface -----------------------------------------------------------------
 
     def static_info(self) -> Dict[str, Any]:
         model = self.sysfs.read("/proc/device-tree/model")
         clusters = self._cpu_clusters()
-        info: Dict[str, Any] = {
+        zones = self._thermal_zones()
+        return {
             "variant": detect_variant(model),
             "little_cores": len(
                 _parse_cpu_list(self._read_in(clusters.get("little"), "related_cpus"))
             ),
             "big_cores": len(_parse_cpu_list(self._read_in(clusters.get("big"), "related_cpus"))),
             "thermal_zone_types": {
-                kind: self.sysfs.read(zone + "/type")
-                for kind, zone in self._thermal_zones().items()
+                kind: self.sysfs.read(zone + "/type") for kind, zone in zones.items()
             },
             "emmc": self._emmc_dir() is not None,
         }
-        return info
 
     def collect(self) -> Dict[str, Any]:
         zones = self._thermal_zones()
@@ -135,7 +143,8 @@ class OdroidN2Collector(Collector):
             out["temp_c"] = cpu_temp
         out["extra"]["ddr_temp_c"] = self._zone_temp(zones.get("ddr"))
         out["extra"]["cpu_freq_mhz"] = self._cluster_freqs()
-        out["extra"]["thermal_throttle"] = self._throttled()
+        out["extra"]["thermal_throttle"] = self._thermal_throttle()
+        out["extra"]["freq_capped"] = self._freq_capped()
         return out
 
     def collect_slow(self) -> Dict[str, Any]:
@@ -158,11 +167,11 @@ class OdroidN2Collector(Collector):
         freqs: Dict[str, Optional[int]] = {}
         for kind, policy in self._cpu_clusters().items():
             khz = self.sysfs.read_int(policy + "/scaling_cur_freq")
-            freqs[kind] = round(khz / 1000) if khz else None
+            freqs[kind] = round(khz / 1000) if khz is not None and 0 < khz <= _MAX_KHZ else None
         return freqs
 
-    def _throttled(self) -> Optional[bool]:
-        """True when a cpufreq cooling device is engaged or a cluster's ceiling is capped."""
+    def _thermal_throttle(self) -> Optional[bool]:
+        """True while a cpufreq cooling device is engaged; None if the kernel exposes none."""
         seen = False
         for path in self.sysfs.glob(_COOLING_GLOB):
             ctype = self.sysfs.read(path) or ""
@@ -172,13 +181,19 @@ class OdroidN2Collector(Collector):
             state = self.sysfs.read_int(path.rsplit("/", 1)[0] + "/cur_state")
             if state is not None and state > 0:
                 return True
+        return False if seen else None
+
+    def _freq_capped(self) -> Optional[bool]:
+        """True when a cluster may not reach its hardware maximum (thermal or administrative)."""
+        seen = False
         for policy in self._cpu_clusters().values():
             cap = self.sysfs.read_int(policy + "/scaling_max_freq")
             hw_max = self.sysfs.read_int(policy + "/cpuinfo_max_freq")
-            if cap is not None and hw_max is not None:
-                seen = True
-                if cap < hw_max:
-                    return True
+            if cap is None or hw_max is None or not 0 < hw_max <= _MAX_KHZ:
+                continue
+            seen = True
+            if cap < hw_max:
+                return True
         return False if seen else None
 
     def _emmc_dir(self) -> Optional[str]:
@@ -191,20 +206,22 @@ class OdroidN2Collector(Collector):
         emmc = self._emmc_dir()
         if emmc is None:
             return None
-        life = self.sysfs.read(emmc + "/life_time")  # "0x01 0x02": slc / mlc estimates, 10% steps
-        pre_eol = self.sysfs.read_int(emmc + "/pre_eol_info")  # 1 normal, 2 warning, 3 urgent
-        if life is None and pre_eol is None:
-            return None  # eMMC < 5.0 modules have no wear data
-        parts = life.split() if life else []
-        return {
-            "a": _hex(parts[0]) if len(parts) > 0 else None,
-            "b": _hex(parts[1]) if len(parts) > 1 else None,
-            "pre_eol": pre_eol,
-        }
+        # life_time: "0x01 0x02" (type A / type B areas, 10% steps); pre_eol_info: "0x01" on
+        # kernels >= 4.15, "01" on older/Hardkernel 4.9 trees. 0x00 means "not defined".
+        parts = (self.sysfs.read(emmc + "/life_time") or "").split()
+        a = _hex(parts[0], _LIFE_MAX) if len(parts) > 0 else None
+        b = _hex(parts[1], _LIFE_MAX) if len(parts) > 1 else None
+        eol_parts = (self.sysfs.read(emmc + "/pre_eol_info") or "").split()
+        pre_eol = _hex(eol_parts[0], _PRE_EOL_MAX) if eol_parts else None
+        if a is None and b is None and pre_eol is None:
+            return None  # eMMC < 5.0 module (or the files are missing): no wear data
+        return {"a": a, "b": b, "pre_eol": pre_eol}
 
 
-def _hex(text: str) -> Optional[int]:
+def _hex(text: str, hi: int) -> Optional[int]:
+    """Parse a sysfs hex byte ("0x01" or "01"); 0 (not defined) and out-of-range -> None."""
     try:
-        return int(text, 16)
+        value = int(text, 16)
     except ValueError:
         return None
+    return value if 1 <= value <= hi else None

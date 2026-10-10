@@ -193,8 +193,19 @@ def test_exec_spec_validates_limits_and_env():
         ExecSpec(run_id="r", command="x", root_op="Reboot Now")
 
 
-def test_odroid_extra_keys_are_allow_listed():
+def test_extra_allow_list_matches_the_agent():
+    """security.md 8.3: the agent and master constants must be identical."""
+    from cluster_agent import agent as agent_mod
+
     from cluster_master.models import BOARDS, EXTRA_KEYS
 
     assert "odroidn2" in BOARDS
-    assert {"ddr_temp_c", "cpu_freq_mhz", "thermal_throttle", "emmc_life"} <= EXTRA_KEYS
+    assert set(agent_mod.EXTRA_KEYS) == EXTRA_KEYS
+    assert len(agent_mod.EXTRA_KEYS) == len(set(agent_mod.EXTRA_KEYS))
+    assert {
+        "ddr_temp_c",
+        "cpu_freq_mhz",
+        "thermal_throttle",
+        "freq_capped",
+        "emmc_life",
+    } <= EXTRA_KEYS

@@ -75,8 +75,16 @@ async def test_mock_cluster(agent_server, state, web, caplog):
         assert n2["static_info"]["variant"] == "n2plus" and n2["static_info"]["cpu_count"] == 6
         assert n2["latest"]["bpu"] is None
         extra = state.metrics.latest("odroidn2-01")["data"]["extra"]
-        assert set(extra) == {"ddr_temp_c", "cpu_freq_mhz", "thermal_throttle"}  # allow-listed
-        assert extra["cpu_freq_mhz"]["little"] == 1896
+        assert {"ddr_temp_c", "cpu_freq_mhz", "thermal_throttle", "freq_capped"} <= set(extra)
+        assert set(extra) <= {
+            "ddr_temp_c",
+            "cpu_freq_mhz",
+            "thermal_throttle",
+            "freq_capped",
+            "emmc_life",
+            "reboot_required",
+        }  # allow-listed only
+        assert extra["cpu_freq_mhz"]["little"] == 1800
 
         # a real command through the agent's executor
         run_id = new_run_id()

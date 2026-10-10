@@ -54,6 +54,7 @@ EXTRA_KEYS = (
     "ddr_temp_c",
     "cpu_freq_mhz",
     "thermal_throttle",
+    "freq_capped",
     "emmc_life",
 )
 

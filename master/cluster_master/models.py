@@ -30,7 +30,8 @@ EXTRA_KEYS = frozenset(
         "isolation_mode",  # all
         "ddr_temp_c",  # odroidn2: second on-die sensor
         "cpu_freq_mhz",  # odroidn2: {"little": MHz, "big": MHz}
-        "thermal_throttle",  # odroidn2: cpufreq cooling engaged
+        "thermal_throttle",  # odroidn2: cpufreq cooling engaged right now
+        "freq_capped",  # odroidn2: a cluster ceiling below the hardware maximum
         "emmc_life",  # odroidn2: {"a", "b", "pre_eol"} wear estimates
     }
 )

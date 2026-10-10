@@ -57,9 +57,15 @@ class MockCollector(Collector):
             "device_model": p["model"],
             "interfaces": {"eth0": {"ipv4": ["192.0.2.10"], "mac": "02:00:00:00:00:01"}},
             "python": "mock",
-            "bpu_cores": 2 if self.board == "rdkx3" else None,
+            **({"bpu_cores": 2} if self.board == "rdkx3" else {}),
             **(
-                {"variant": "n2plus", "little_cores": 2, "big_cores": 4, "emmc": True}
+                {
+                    "variant": "n2plus",
+                    "little_cores": 2,
+                    "big_cores": 4,
+                    "thermal_zone_types": {"cpu": "cpu-thermal", "ddr": "ddr-thermal"},
+                    "emmc": True,
+                }
                 if self.board == "odroidn2"
                 else {}
             ),
@@ -76,9 +82,11 @@ class MockCollector(Collector):
         if self.board == "rdkx3":
             extra["bpu"] = [self.rng.randint(0, 60), self.rng.randint(0, 60)]
         elif self.board == "odroidn2":
+            # N2+ on a mainline-based kernel: A53 1.8 GHz ceiling, A73 2.208 GHz
             extra["ddr_temp_c"] = round(self.temp - 5, 1)
-            extra["cpu_freq_mhz"] = {"little": 1896, "big": 2208 if self.cpu > 50 else 1800}
+            extra["cpu_freq_mhz"] = {"little": 1800, "big": 2208 if self.cpu > 50 else 1800}
             extra["thermal_throttle"] = False
+            extra["freq_capped"] = False
         else:
             extra["throttled"] = "0x0"
         return {
@@ -121,4 +129,12 @@ class MockCollector(Collector):
         }
 
     def collect_slow(self) -> Dict[str, Any]:
-        return {"top": [{"pid": 1, "name": "systemd", "user": "root", "cpu": 0.1, "mem": 1.2}]}
+        slow: Dict[str, Any] = {
+            "top": [{"pid": 1, "name": "systemd", "user": "root", "cpu": 0.1, "mem": 1.2}],
+            "extra": {"reboot_required": False},  # as CommonCollector reports it
+        }
+        if self.board == "odroidn2":
+            slow["extra"]["emmc_life"] = {"a": 1, "b": 2, "pre_eol": 1}
+        elif self.board == "rpi3":
+            slow["extra"]["core_volts"] = 1.2
+        return slow
